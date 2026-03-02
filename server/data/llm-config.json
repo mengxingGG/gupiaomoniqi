@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "modelPath": "./models/Qwen3-1.7B-Q8_0.gguf",
+  "backend": "auto",
+  "contextSize": 4096,
+  "threads": 8,
+  "gpuLayers": 0,
+  "batchSize": 512,
+  "temperature": 0.7,
+  "maxTokens": 256,
+  "topP": 0.9,
+  "topK": 40,
+  "repeatPenalty": 1.1,
+  "smartTraderCount": 50,
+  "tradeIntervalMs": 5000,
+  "maxConcurrentDecisions": 5,
+  "mockMode": false,
+  "notes": {
+    "backend": "auto=自动选择, cpu=强制CPU, cuda=NVIDIA GPU, metal=Apple GPU",
+    "gpuLayers": "0=全CPU, -1=全部层放GPU, N=前N层放GPU",
+    "mockMode": "true=不加载模型，使用随机决策（调试用）"
+  }
+}

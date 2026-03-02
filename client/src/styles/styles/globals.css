@@ -1,0 +1,162 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-up: #ff4d4f;
+  --color-down: #52c41a;
+  --color-flat: #8c8c8c;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 14px;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.5;
+}
+
+/* 涨跌颜色类 */
+.text-up {
+  color: var(--color-up);
+}
+
+.text-down {
+  color: var(--color-down);
+}
+
+.text-flat {
+  color: var(--color-flat);
+}
+
+.bg-up {
+  background-color: var(--color-up);
+}
+
+.bg-down {
+  background-color: var(--color-down);
+}
+
+/* 主色hover类 */
+.bg-primary-hover {
+  background-color: #40a9ff;
+}
+
+.hover\:bg-primary-hover:hover {
+  background-color: #40a9ff;
+}
+
+.text-primary-hover:hover {
+  color: #40a9ff;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}
+
+/* 暗色滚动条 */
+.dark ::-webkit-scrollbar-thumb {
+  background: #4a5568;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #718096;
+}
+
+/* 数字字体 */
+.font-number {
+  font-family: 'Fira Code', 'Roboto Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 动画 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* 按钮基础样式 */
+.btn {
+  @apply px-4 py-2 rounded font-medium transition-colors duration-200;
+}
+
+.btn-primary {
+  @apply bg-primary text-white;
+}
+
+.btn-primary:hover {
+  @apply bg-primary-hover;
+}
+
+.btn-secondary {
+  @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
+}
+
+.dark .btn-secondary {
+  @apply bg-gray-700 text-gray-200 hover:bg-gray-600;
+}
+
+/* 输入框基础样式 */
+.input {
+  @apply w-full px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-primary;
+}
+
+.dark .input {
+  @apply bg-gray-800 border-gray-600 text-white;
+}
+
+/* 卡片样式 */
+.card {
+  @apply bg-white rounded-lg shadow-md p-4;
+}
+
+.dark .card {
+  @apply bg-gray-800 border border-gray-700;
+}

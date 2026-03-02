@@ -1,0 +1,10 @@
+{
+  "giftCodes": [
+    {
+      "code": "88888888",
+      "reward": 5000000,
+      "maxUses": -1,
+      "description": "开发者礼包 - 无限使用,奖励500万"
+    }
+  ]
+}
