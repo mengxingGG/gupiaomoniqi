@@ -16,7 +16,8 @@ server/dist/
 
 # LLM 模型文件
 *.gguf
-
+*.ggml
+*.bin
 
 # Claude 项目文件
 .claude/
@@ -46,3 +47,36 @@ yarn-error.log*
 *.tmp
 *.temp
 .cache/
+API_KEYS.md
+
+# 备份文件
+*.backup
+*.backup2
+*.timestamp-*
+
+# 环境变量
+.env
+.env.backup
+.env.local
+
+# SQLite WAL
+*.db-shm
+*.db-wal
+
+# 数据文件
+stocks.db
+
+# 移动端 Gradle 缓存
+mobile-app/android/.gradle/
+mobile-app/android/build/
+mobile-app/android/app/build/
+mobile-app/android/.cxx/
+
+# 移动端 node_modules
+mobile-app/node_modules/
+mobile-app/dist/
+mobile-app/android/app/.cxx/
+mobile-app/android/.gradle/
+
+# Gradle 下载文件
+gradle-*.zip

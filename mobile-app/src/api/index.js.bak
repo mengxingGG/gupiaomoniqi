@@ -1,0 +1,68 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.playerApi = exports.tradeApi = exports.marketApi = exports.authApi = void 0;
+var axios_1 = require("axios");
+// API 配置
+var API_BASE_URL = 'http://127.0.0.1:80'; // 本地开发
+var API_KEY = 'fbd12ccc6e459d8dce75897fd3d57972';
+// 创建 axios 实例
+var api = axios_1.default.create({
+    baseURL: API_BASE_URL,
+    timeout: 10000,
+    headers: {
+        'X-API-Key': API_KEY,
+        'Content-Type': 'application/json',
+    },
+});
+// 请求拦截器：添加 JWT Token
+api.interceptors.request.use(function (config) {
+    var token = localStorage.getItem('token');
+    if (token) {
+        config.headers.Authorization = "Bearer ".concat(token);
+    }
+    return config;
+});
+// 响应拦截器：处理错误
+api.interceptors.response.use(function (response) { return response.data; }, function (error) {
+    var _a;
+    if (((_a = error.response) === null || _a === void 0 ? void 0 : _a.status) === 401) {
+        // Token 过期，清除登录状态
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+    }
+    return Promise.reject(error);
+});
+// 认证 API
+exports.authApi = {
+    login: function (username, password) {
+        return api.post('/api/auth/login', { username: username, password: password });
+    },
+    register: function (username, password, displayName) {
+        return api.post('/api/auth/register', { username: username, password: password, displayName: displayName });
+    },
+    getProfile: function () { return api.get('/api/auth/me'); },
+};
+// 股票市场 API
+exports.marketApi = {
+    getStocks: function () { return api.get('/api/market/stocks'); },
+    getStock: function (code) { return api.get("/api/market/stock/".concat(code)); },
+    getTimeline: function (code) { return api.get("/api/market/stock/".concat(code, "/timeline")); },
+    getDaily: function (code) { return api.get("/api/market/stock/".concat(code, "/daily")); },
+};
+// 交易 API
+exports.tradeApi = {
+    buy: function (stockCode, quantity) {
+        return api.post('/api/trade/buy', { stockCode: stockCode, quantity: quantity });
+    },
+    sell: function (stockCode, quantity) {
+        return api.post('/api/trade/sell', { stockCode: stockCode, quantity: quantity });
+    },
+};
+// 玩家 API
+exports.playerApi = {
+    getPortfolio: function () { return api.get('/api/player/portfolio'); },
+    getOrders: function () { return api.get('/api/orders'); },
+    getPositions: function () { return api.get('/api/positions'); },
+};
+exports.default = api;

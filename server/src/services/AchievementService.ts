@@ -191,3 +191,23 @@ export class AchievementService {
 }
 
 export const achievementService = new AchievementService();
+
+export function checkAchievements(playerId: string): string[] {
+  const newlyUnlocked: string[] = [];
+  const existing = dbUtils.query<{ achievement_id: string }>(
+    "SELECT achievement_id FROM achievements WHERE player_id = ?", [playerId]
+  );
+  const unlockedIds = new Set(existing.map(a => a.achievement_id));
+  for (const def of achievementDefinitions) {
+    if (unlockedIds.has(def.id)) continue;
+    const isUnlocked = def.condition(playerId);
+    if (isUnlocked) {
+      dbUtils.run(
+        "INSERT OR IGNORE INTO achievements (id, player_id, achievement_id, unlocked_at) VALUES (?, ?, ?, ?)",
+        [playerId + "_" + def.id, playerId, def.id, Date.now()]
+      );
+      newlyUnlocked.push(def.id);
+    }
+  }
+  return newlyUnlocked;
+}

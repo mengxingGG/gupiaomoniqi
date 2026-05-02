@@ -1,4 +1,4 @@
-import initSqlJs, { Database } from 'sql.js';
+import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -14,11 +14,8 @@ if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
-// SQL.js 数据库实例
-let db: Database | null = null;
-
-// 是否处于事务中（防止 saveDatabase 被事务内的 run 触发）
-let inTransaction = false;
+// better-sqlite3 数据库实例
+let db: Database.Database | null = null;
 
 // 表创建 SQL
 const createTableSQLs = [
@@ -145,65 +142,56 @@ const createTableSQLs = [
   `CREATE INDEX IF NOT EXISTS idx_achievements_player ON achievements(player_id)`,
 ];
 
-// 初始化数据库
-export async function initDatabase(): Promise<Database> {
-  // 显式指定 wasm 文件路径，避免在不同工作目录下找不到
-  const wasmPath = path.resolve(__dirname, '../../node_modules/sql.js/dist/sql-wasm.wasm');
-  const SQL = await initSqlJs({
-    locateFile: () => wasmPath,
-  });
-
-  // 尝试加载现有数据库
-  if (fs.existsSync(dbPath)) {
-    try {
-      const fileBuffer = fs.readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-      console.log('✅ Database loaded from file');
-    } catch (error) {
-      console.log('⚠️ Failed to load existing database, creating new one');
-      db = new SQL.Database();
-    }
-  } else {
-    db = new SQL.Database();
-    console.log('✅ New database created');
-  }
-
+// 初始化数据库（同步）
+export function initDatabase(): void {
+  // 打开数据库文件（不存在则创建）
+  db = new Database(dbPath);
+  
+  // 启用 WAL 模式，提升并发性能
+  db.pragma('journal_mode = WAL');
+  
   // 创建表
   for (const sql of createTableSQLs) {
     try {
-      db.run(sql);
+      db.exec(sql);
     } catch (error) {
       // 忽略已存在的表错误
     }
   }
+  
+  console.log('✅ Database initialized (better-sqlite3)');
+}
 
-  // 保存数据库
-  saveDatabase();
-
-  return db;
+// 兼容旧的异步接口
+export async function initDatabaseAsync(): Promise<Database.Database> {
+  initDatabase();
+  return db!;
 }
 
 // 获取数据库实例
-export function getDb(): Database {
+export function getDb(): Database.Database {
   if (!db) {
     throw new Error('Database not initialized. Call initDatabase() first.');
   }
   return db;
 }
 
-// 保存数据库到文件
+// 保存数据库（better-sqlite3 自动持久化，此函数保留用于兼容）
 export function saveDatabase() {
+  // better-sqlite3 自动持久化，无需手动保存
+  // 执行 checkpoint 确保 WAL 文件写入主数据库
   if (db) {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    fs.writeFileSync(dbPath, buffer);
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // 忽略 checkpoint 错误
+    }
   }
 }
 
 // 关闭数据库
 export function closeDatabase() {
   if (db) {
-    saveDatabase();
     db.close();
     db = null;
   }
@@ -214,52 +202,34 @@ export const dbUtils = {
   // 执行 SQL 并返回结果
   query: <T>(sql: string, params: any[] = []): T[] => {
     if (!db) throw new Error('Database not initialized');
-
+    
     const stmt = db.prepare(sql);
-    stmt.bind(params);
-    const results: T[] = [];
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as T;
-      results.push(row);
-    }
-    stmt.free();
-    return results;
+    return stmt.all(...params) as T[];
   },
 
   // 执行 SQL 并返回单个结果
   queryOne: <T>(sql: string, params: any[] = []): T | null => {
-    const results = dbUtils.query<T>(sql, params);
-    return results.length > 0 ? results[0] : null;
+    if (!db) throw new Error('Database not initialized');
+    
+    const stmt = db.prepare(sql);
+    return stmt.get(...params) as T | null;
   },
 
   // 执行 INSERT/UPDATE/DELETE
   run: (sql: string, params: any[] = []): { changes: number } => {
     if (!db) throw new Error('Database not initialized');
-
-    db.run(sql, params);
-    // 事务期间不调用 saveDatabase（db.export() 会隐式提交事务）
-    if (!inTransaction) {
-      saveDatabase();
-    }
-    return { changes: db.getRowsModified() };
+    
+    const stmt = db.prepare(sql);
+    const result = stmt.run(...params);
+    return { changes: result.changes };
   },
 
   // 执行多个 SQL（事务）
   transaction: (fn: () => void) => {
     if (!db) throw new Error('Database not initialized');
-
-    inTransaction = true;
-    db.run('BEGIN TRANSACTION');
-    try {
-      fn();
-      db.run('COMMIT');
-      inTransaction = false;
-      saveDatabase();
-    } catch (error) {
-      db.run('ROLLBACK');
-      inTransaction = false;
-      throw error;
-    }
+    
+    const transaction = db.transaction(fn);
+    transaction();
   },
 };
 

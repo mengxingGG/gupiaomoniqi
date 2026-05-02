@@ -101,12 +101,17 @@ export default function LoginPage() {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder={mode === 'register' ? '3-20个字符，用于登录' : '输入用户名'}
+                placeholder={mode === 'register' ? '3-20个字符，只能包含字母、数字、下划线' : '输入用户名'}
                 minLength={mode === 'register' ? 3 : 1}
                 maxLength={20}
                 required
                 className="w-full px-3 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary"
               />
+              {mode === 'register' && (
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  用户名只能包含字母、数字和下划线，不能使用中文或特殊符号
+                </p>
+              )}
             </div>
 
             {/* 密码 */}
@@ -118,11 +123,16 @@ export default function LoginPage() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={mode === 'register' ? '至少6位' : '输入密码'}
-                minLength={mode === 'register' ? 6 : 1}
+                placeholder={mode === 'register' ? '至少8位，包含大小写字母和数字' : '输入密码'}
+                minLength={mode === 'register' ? 8 : 1}
                 required
                 className="w-full px-3 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary"
               />
+              {mode === 'register' && (
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  密码要求：至少8位，包含大写字母、小写字母和数字
+                </p>
+              )}
             </div>
 
             {/* 错误提示 */}

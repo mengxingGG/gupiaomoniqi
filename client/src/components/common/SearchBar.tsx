@@ -18,7 +18,7 @@ export default function SearchBar({
   debounceTime = 300,
 }: SearchBarProps) {
   const [query, setQuery] = useState(defaultValue)
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 清理函数
   useEffect(() => {

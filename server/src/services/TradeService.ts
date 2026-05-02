@@ -1,5 +1,6 @@
 import { dbUtils } from '../db/index.js';
 import { v4 as uuidv4 } from 'uuid';
+import { achievementService } from './AchievementService.js';
 
 const FEE_RATE = 0.0003;
 
@@ -73,6 +74,11 @@ function calcTotalAssets(playerId: string, cash: number): number {
 }
 
 export class TradeService {
+  // 判断是否为 T+0 市场
+  private isT0Market(market: string): boolean {
+    return market.endsWith('_T0');
+  }
+
   // 买入
   buy(input: TradeInput): { order: any; player: PlayerRow } {
     const { playerId, stockCode, quantity, orderMode, price } = input;
@@ -96,7 +102,7 @@ export class TradeService {
     }
 
     // 3. 计算成交价格
-    const executionPrice = orderMode === 'MARKET' ? stock.current_price : (price || stock.current_price);
+    let executionPrice = orderMode === 'MARKET' ? stock.current_price : (price || stock.current_price);
 
     // 4. 计算所需资金
     const totalCost = executionPrice * quantity;
@@ -110,7 +116,20 @@ export class TradeService {
 
     const now = Date.now();
 
-    // 6. 创建订单
+    // 6. 判断是否立即成交或挂单
+    let shouldPending = false;
+    
+    if (orderMode === 'LIMIT' && price !== undefined) {
+      const currentPx = stock.current_price;
+      // 买单：股价 > 限价时挂单等待，股价 <= 限价时成交
+      // 卖单：股价 < 限价时挂单等待，股价 >= 限价时成交
+      if (currentPx > price) {
+        shouldPending = true;
+        executionPrice = price;
+      }
+    }
+
+    // 7. 创建订单
     const orderId = uuidv4();
     const newOrder: OrderRow = {
       id: orderId,
@@ -122,10 +141,10 @@ export class TradeService {
       quantity,
       price: orderMode === 'LIMIT' ? price! : null,
       executed_price: executionPrice,
-      status: 'EXECUTED',
-      fee,
+      status: shouldPending ? 'PENDING' : 'EXECUTED',
+      fee: 0,
       created_at: now,
-      executed_at: now,
+      executed_at: shouldPending ? null : now,
     };
 
     dbUtils.transaction(() => {
@@ -134,36 +153,47 @@ export class TradeService {
         [newOrder.id, newOrder.player_id, newOrder.stock_code, newOrder.stock_name, newOrder.type, newOrder.order_mode, newOrder.quantity, newOrder.price, newOrder.executed_price, newOrder.status, newOrder.fee, newOrder.created_at, newOrder.executed_at]
       );
 
-      // 7. 更新或创建持仓
-      const existingPosition = dbUtils.queryOne<PositionRow>(
-        'SELECT * FROM positions WHERE player_id = ? AND stock_code = ?',
-        [playerId, stockCode]
-      );
-
-      if (!existingPosition) {
+      if (shouldPending) {
+        // 限价挂单：冻结资金
+        const totalCost = executionPrice * quantity;
+        const fee = totalCost * FEE_RATE;
+        const totalWithFee = totalCost + fee;
         dbUtils.run(
-          'INSERT INTO positions (id, player_id, stock_code, stock_name, market, quantity, available_quantity, average_cost, total_cost, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [uuidv4(), playerId, stockCode, stock.name, stock.market, quantity, quantity, executionPrice, totalCost, now]
+          'UPDATE players SET cash = cash - ?, updated_at = ? WHERE id = ?',
+          [totalWithFee, now, playerId]
         );
       } else {
-        const newQuantity = existingPosition.quantity + quantity;
-        const newTotalCost = existingPosition.total_cost + totalCost;
-        const newAvgCost = newTotalCost / newQuantity;
+        // 7. 更新或创建持仓
+        const existingPosition = dbUtils.queryOne<PositionRow>(
+          'SELECT * FROM positions WHERE player_id = ? AND stock_code = ?',
+          [playerId, stockCode]
+        );
+
+        if (!existingPosition) {
+          dbUtils.run(
+            'INSERT INTO positions (id, player_id, stock_code, stock_name, market, quantity, available_quantity, average_cost, total_cost, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [uuidv4(), playerId, stockCode, stock.name, stock.market, quantity, this.isT0Market(stock.market) ? quantity : 0, executionPrice, totalCost, now]
+          );
+        } else {
+          const newQuantity = existingPosition.quantity + quantity;
+          const newTotalCost = existingPosition.total_cost + totalCost;
+          const newAvgCost = newTotalCost / newQuantity;
+          dbUtils.run(
+            'UPDATE positions SET quantity = ?, available_quantity = ?, average_cost = ?, total_cost = ? WHERE id = ?',
+            [newQuantity, this.isT0Market(stock.market) ? existingPosition.available_quantity + quantity : existingPosition.available_quantity, newAvgCost, newTotalCost, existingPosition.id]
+          );
+        }
+
+        // 8. 更新玩家资金
         dbUtils.run(
-          'UPDATE positions SET quantity = ?, available_quantity = ?, average_cost = ?, total_cost = ? WHERE id = ?',
-          [newQuantity, existingPosition.available_quantity + quantity, newAvgCost, newTotalCost, existingPosition.id]
+          'UPDATE players SET cash = cash - ?, updated_at = ? WHERE id = ?',
+          [totalWithFee, now, playerId]
+        );
+        dbUtils.run(
+          'INSERT INTO transactions (id, player_id, stock_code, stock_name, type, quantity, price, total, fee, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [uuidv4(), playerId, stockCode, stock.name, 'BUY', quantity, executionPrice, totalCost, fee, now]
         );
       }
-
-      // 8. 更新玩家资金
-      dbUtils.run(
-        'UPDATE players SET cash = cash - ?, updated_at = ? WHERE id = ?',
-        [totalWithFee, now, playerId]
-      );
-      dbUtils.run(
-        'INSERT INTO transactions (id, player_id, stock_code, stock_name, type, quantity, price, total, fee, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [uuidv4(), playerId, stockCode, stock.name, 'BUY', quantity, executionPrice, totalCost, fee, now]
-      );
     });
 
     // 10. 重新获取更新后的玩家数据并计算总资产
@@ -178,6 +208,13 @@ export class TradeService {
       [totalAssets, playerId]
     );
     updatedPlayer!.total_assets = totalAssets;
+
+    // 检查并解锁成就
+    try {
+      achievementService.checkAchievements(playerId);
+    } catch (e) {
+      console.error('检查成就失败:', e);
+    }
 
     return {
       order: newOrder,
@@ -213,14 +250,26 @@ export class TradeService {
     }
 
     // 4. 计算成交价格
-    const executionPrice = orderMode === 'MARKET' ? stock.current_price : (price || stock.current_price);
+    let executionPrice = orderMode === 'MARKET' ? stock.current_price : (price || stock.current_price);
 
     // 5. 计算所得
     const totalProceeds = executionPrice * quantity;
     const fee = totalProceeds * FEE_RATE;
     const netProceeds = totalProceeds - fee;
 
-    // 6. 获取玩家
+    // 6. 判断是否立即成交或挂单
+    let shouldPending = false;
+    
+    if (orderMode === 'LIMIT' && price !== undefined) {
+      const currentPx = stock.current_price;
+      // 卖单：股价 < 限价时挂单等待，股价 >= 限价时成交
+      if (currentPx < price) {
+        shouldPending = true;
+        executionPrice = price;
+      }
+    }
+
+    // 7. 获取玩家
     const player = dbUtils.queryOne<PlayerRow>(
       'SELECT * FROM players WHERE id = ?',
       [playerId]
@@ -231,7 +280,7 @@ export class TradeService {
 
     const now = Date.now();
 
-    // 7. 创建订单
+    // 8. 创建订单
     const orderId = uuidv4();
     const newOrder: OrderRow = {
       id: orderId,
@@ -243,10 +292,10 @@ export class TradeService {
       quantity,
       price: orderMode === 'LIMIT' ? price! : null,
       executed_price: executionPrice,
-      status: 'EXECUTED',
-      fee,
+      status: shouldPending ? 'PENDING' : 'EXECUTED',
+      fee: 0,
       created_at: now,
-      executed_at: now,
+      executed_at: shouldPending ? null : now,
     };
 
     dbUtils.transaction(() => {
@@ -255,29 +304,37 @@ export class TradeService {
         [newOrder.id, newOrder.player_id, newOrder.stock_code, newOrder.stock_name, newOrder.type, newOrder.order_mode, newOrder.quantity, newOrder.price, newOrder.executed_price, newOrder.status, newOrder.fee, newOrder.created_at, newOrder.executed_at]
       );
 
-      // 8. 更新持仓
-      const newQuantity = position.quantity - quantity;
-      if (newQuantity <= 0) {
-        dbUtils.run('DELETE FROM positions WHERE id = ?', [position.id]);
-      } else {
-        const newTotalCost = position.total_cost * (newQuantity / position.quantity);
+      if (shouldPending) {
+        // 限价挂单：冻结持仓（不可卖出）
         dbUtils.run(
-          'UPDATE positions SET quantity = ?, available_quantity = ?, total_cost = ? WHERE id = ?',
-          [newQuantity, position.available_quantity - quantity, newTotalCost, position.id]
+          'UPDATE positions SET available_quantity = available_quantity - ? WHERE id = ?',
+          [quantity, position.id]
+        );
+      } else {
+        // 8. 更新持仓
+        const newQuantity = position.quantity - quantity;
+        if (newQuantity <= 0) {
+          dbUtils.run('DELETE FROM positions WHERE id = ?', [position.id]);
+        } else {
+          const newTotalCost = position.total_cost * (newQuantity / position.quantity);
+          dbUtils.run(
+            'UPDATE positions SET quantity = ?, available_quantity = ?, total_cost = ? WHERE id = ?',
+            [newQuantity, position.available_quantity - quantity, newTotalCost, position.id]
+          );
+        }
+
+        // 9. 更新玩家资金
+        dbUtils.run(
+          'UPDATE players SET cash = cash + ?, updated_at = ? WHERE id = ?',
+          [netProceeds, now, playerId]
+        );
+
+        // 10. 创建交易记录
+        dbUtils.run(
+          'INSERT INTO transactions (id, player_id, stock_code, stock_name, type, quantity, price, total, fee, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [uuidv4(), playerId, stockCode, stock.name, 'SELL', quantity, executionPrice, totalProceeds, fee, now]
         );
       }
-
-      // 9. 更新玩家资金
-      dbUtils.run(
-        'UPDATE players SET cash = cash + ?, updated_at = ? WHERE id = ?',
-        [netProceeds, now, playerId]
-      );
-
-      // 10. 创建交易记录
-      dbUtils.run(
-        'INSERT INTO transactions (id, player_id, stock_code, stock_name, type, quantity, price, total, fee, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [uuidv4(), playerId, stockCode, stock.name, 'SELL', quantity, executionPrice, totalProceeds, fee, now]
-      );
     });
 
     // 11. 重新获取玩家数据并计算总资产
@@ -292,6 +349,13 @@ export class TradeService {
       [totalAssets, playerId]
     );
     updatedPlayer!.total_assets = totalAssets;
+
+    // 检查并解锁成就
+    try {
+      achievementService.checkAchievements(playerId);
+    } catch (e) {
+      console.error('检查成就失败:', e);
+    }
 
     return {
       order: newOrder,
@@ -328,6 +392,20 @@ export class TradeService {
         [refundAmount, now, playerId]
       );
     }
+    
+    // 如果是卖单，解冻持仓
+    if (order.type === 'SELL' && order.stock_code) {
+      const position = dbUtils.queryOne<PositionRow>(
+        'SELECT * FROM positions WHERE player_id = ? AND stock_code = ?',
+        [playerId, order.stock_code]
+      );
+      if (position) {
+        dbUtils.run(
+          'UPDATE positions SET available_quantity = available_quantity + ? WHERE id = ?',
+          [order.quantity, position.id]
+        );
+      }
+    }
 
     const updatedPlayer = dbUtils.queryOne<PlayerRow>(
       'SELECT * FROM players WHERE id = ?',
@@ -362,6 +440,29 @@ export class TradeService {
       'SELECT * FROM transactions WHERE player_id = ? ORDER BY created_at DESC LIMIT ?',
       [playerId, limit]
     );
+  }
+
+
+  // 每日重置 T+1 股票的 available_quantity
+  resetT1AvailableQuantities(): void {
+    // 获取所有 T+1 持仓
+    const t1Positions = dbUtils.query<PositionRow>(
+      `SELECT p.*, s.market FROM positions p 
+       JOIN stocks s ON p.stock_code = s.code 
+       WHERE s.market LIKE '%_T1'`
+    );
+    
+    const now = Date.now();
+    
+    for (const position of t1Positions) {
+      // T+1 股票：将 available_quantity 设置为 quantity（次日可卖）
+      dbUtils.run(
+        'UPDATE positions SET available_quantity = ? WHERE id = ?',
+        [position.quantity, position.id]
+      );
+    }
+    
+    console.log(`✅ 已重置 ${t1Positions.length} 个 T+1 持仓的可用数量`);
   }
 }
 

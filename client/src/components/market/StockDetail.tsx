@@ -99,12 +99,12 @@ export default function StockDetail({ stock }: StockDetailProps) {
           crosshairMarkerVisible: false,
         })
 
-        const history = (stock.priceHistory ?? [])
+        const timelineData = (stock.timeline ?? [])
           .filter(p => p?.time && p?.price > 0)
           .sort((a, b) => a.time - b.time)
 
-        if (history.length > 1) {
-          const data = history.map(p => ({
+        if (timelineData.length > 1) {
+          const data = timelineData.map(p => ({
             time: Math.floor(p.time / 1000) as any,
             value: p.price,
           }))
@@ -139,8 +139,8 @@ export default function StockDetail({ stock }: StockDetailProps) {
         chart.priceScale('vol').applyOptions({
           scaleMargins: { top: 0.75, bottom: 0 },
         })
-        if (history.length > 1) {
-          volSeries.setData(history.map(p => ({
+        if (timelineData.length > 1) {
+          volSeries.setData(timelineData.map(p => ({
             time: Math.floor(p.time / 1000) as any,
             value: p.volume ?? 0,
             color: p.price >= previousClose ? 'rgba(255,77,79,0.4)' : 'rgba(34,197,94,0.4)',
@@ -157,42 +157,64 @@ export default function StockDetail({ stock }: StockDetailProps) {
           wickDownColor: '#22c55e',
         })
 
-        // 30日模拟历史
-        const kData: any[] = []
-        const daySec = 86400
-        const nowSec = Math.floor(Date.now() / 1000)
-        let base = previousClose
-        for (let i = 30; i >= 1; i--) {
-          const chg = (Math.random() - 0.5) * 0.06
-          const o = base
-          const c = Math.round(base * (1 + chg) * 100) / 100
-          const h = Math.round(Math.max(o, c) * (1 + Math.random() * 0.02) * 100) / 100
-          const l = Math.round(Math.min(o, c) * (1 - Math.random() * 0.02) * 100) / 100
-          kData.push({ time: (nowSec - i * daySec) as any, open: o, high: h, low: l, close: c })
-          base = c
-        }
-        // 今日真实数据
-        kData.push({
-          time: nowSec as any,
-          open: openPrice,
-          high: highPrice,
-          low: lowPrice,
-          close: currentPrice,
-        })
-        candleSeries.setData(kData)
-
-        // 日量柱
+        // 日K成交量
         const volSeries = chart.addHistogramSeries({
           color: 'rgba(255,77,79,0.4)',
           priceScaleId: 'vol',
           priceFormat: { type: 'volume' },
         })
         chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } })
-        volSeries.setData(kData.map(k => ({
-          time: k.time,
-          value: Math.round(Math.random() * 5000000 + 500000),
-          color: k.close >= k.open ? 'rgba(255,77,79,0.4)' : 'rgba(34,197,94,0.4)',
-        })))
+
+        // 使用真实日K数据（24小时内，1小时一个点）
+        const dailyData = (stock.dailyK ?? [])
+          .filter(p => p?.time && p?.close > 0)
+          .sort((a, b) => a.time - b.time)
+
+        if (dailyData.length > 1) {
+          candleSeries.setData(dailyData.map(k => ({
+            time: Math.floor(k.time / 1000) as any,
+            open: k.open,
+            high: k.high,
+            low: k.low,
+            close: k.close,
+          })))
+          
+          // 日K成交量
+          volSeries.setData(dailyData.map(k => ({
+            time: Math.floor(k.time / 1000) as any,
+            value: k.volume ?? 0,
+            color: k.close >= k.open ? 'rgba(255,77,79,0.4)' : 'rgba(34,197,94,0.4)',
+          })))
+        } else {
+          // 无数据 → 模拟24小时K
+          const kData: any[] = []
+          const hourSec = 3600
+          const nowSec = Math.floor(Date.now() / 1000)
+          let base = previousClose
+          for (let i = 24; i >= 1; i--) {
+            const chg = (Math.random() - 0.5) * 0.04
+            const o = base
+            const c = Math.round(base * (1 + chg) * 100) / 100
+            const h = Math.round(Math.max(o, c) * (1 + Math.random() * 0.01) * 100) / 100
+            const l = Math.round(Math.min(o, c) * (1 - Math.random() * 0.01) * 100) / 100
+            kData.push({ time: (nowSec - i * hourSec) as any, open: o, high: h, low: l, close: c })
+            base = c
+          }
+          // 今日数据
+          kData.push({
+            time: nowSec as any,
+            open: openPrice,
+            high: highPrice,
+            low: lowPrice,
+            close: currentPrice,
+          })
+          candleSeries.setData(kData)
+          volSeries.setData(kData.map(k => ({
+            time: k.time,
+            value: Math.round(Math.random() * 5000000 + 500000),
+            color: k.close >= k.open ? 'rgba(255,77,79,0.4)' : 'rgba(34,197,94,0.4)',
+          })))
+        }
       }
 
       chart.timeScale().fitContent()

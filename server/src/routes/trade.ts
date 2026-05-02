@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { tradeService } from '../services/TradeService.js';
+import { tradeService, TradeInput } from '../services/TradeService.js';
 import { z } from 'zod';
 
 // 买入输入验证
@@ -35,7 +35,7 @@ export async function buyRoute(fastify: FastifyInstance) {
       const result = await tradeService.buy({
         playerId: user.userId,
         ...input,
-      });
+      } as TradeInput);
 
       reply.send({
         success: true,
@@ -83,7 +83,7 @@ export async function sellRoute(fastify: FastifyInstance) {
       const result = await tradeService.sell({
         playerId: user.userId,
         ...input,
-      });
+      } as TradeInput);
 
       reply.send({
         success: true,

@@ -1,6 +1,7 @@
 import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyJwt from '@fastify/jwt';
+import rateLimit from '@fastify/rate-limit';
 import { env, printEnv } from './config/env.js';
 import { initDatabase, closeDatabase, saveDatabase } from './db/index.js';
 
@@ -15,6 +16,9 @@ import { giftCodeRoutes } from './routes/giftcode.js';
 import { rankingRoutes } from './routes/ranking.js';
 import { achievementRoutes } from './routes/achievements.js';
 import { startPriceEngine, setWebSocketServer, addAIPressure } from './market/MarketEngine.js';
+import { startOrderExecutor } from './services/OrderExecutor.js';
+import { tradeService } from './services/TradeService.js';
+import { runAITradingRound, startAITradingEngine, resetAIPositionsT1 } from './market/AIEngine.js';
 
 import { WebSocketServer } from 'ws';
 
@@ -26,8 +30,8 @@ declare module 'fastify' {
 }
 
 async function buildApp() {
-  // 初始化数据库（包含表创建）
-  await initDatabase();
+  // 初始化数据库（同步）
+  initDatabase();
 
   const fastify = Fastify({
     logger: {
@@ -38,7 +42,22 @@ async function buildApp() {
   // 注册 CORS
   await fastify.register(cors, {
     origin: env.CORS_ORIGIN,
-    credentials: true,
+    credentials: false, // 暂时禁用凭据以避免 CORS 问题
+  });
+
+  // 注册速率限制
+  await fastify.register(rateLimit, {
+    max: 100, // 每分钟最多 100 次请求
+    timeWindow: '1 minute',
+    keyGenerator: (request) => {
+      // 使用 IP + User-Agent 作为限流键
+      return request.ip + (request.headers['user-agent'] || '');
+    },
+    errorResponseBuilder: () => ({
+      success: false,
+      error: '请求过于频繁，请稍后再试',
+      code: 'RATE_LIMIT_EXCEEDED',
+    }),
   });
 
   // 注册 JWT
@@ -89,8 +108,51 @@ async function buildApp() {
 
   // 启动价格引擎
   startPriceEngine(5000);
+  startOrderExecutor(5000);
+
+  // 启动 AI 交易引擎（每 5 分钟执行一次）
+  startAITradingEngine(5 * 60 * 1000);
+
+  // 启动每日 T+1 持仓重置（凌晨 00:00 执行）
+  startDailyT1Reset();
 
   return fastify;
+}
+
+// 每日重置 T+1 持仓的定时任务（凌晨 00:00 执行）
+function startDailyT1Reset() {
+  console.log('🔄 启动每日 T+1 持仓重置定时任务 (每日凌晨 00:00)');
+  
+  // 计算到下一个 00:00 的毫秒数
+  function msToNextMidnight(): number {
+    const now = new Date();
+    const midnight = new Date(now);
+    midnight.setHours(24, 0, 0, 0); // 下一个 00:00
+    return midnight.getTime() - now.getTime();
+  }
+  
+  // 首次执行：等待到下一个 00:00
+  const firstDelay = msToNextMidnight();
+  console.log(`⏰ 首次重置将在 ${(firstDelay / 1000 / 60).toFixed(0)} 分钟后执行`);
+  
+  setTimeout(() => {
+    try {
+      tradeService.resetT1AvailableQuantities();
+      console.log('✅ 每日 T+1 持仓重置完成 (00:00)');
+    } catch (error) {
+      console.error('❌ 重置 T+1 持仓失败:', error);
+    }
+    
+    // 然后每 24 小时执行一次
+    setInterval(() => {
+      try {
+        tradeService.resetT1AvailableQuantities();
+        console.log('✅ 每日 T+1 持仓重置完成 (00:00)');
+      } catch (error) {
+        console.error('❌ 重置 T+1 持仓失败:', error);
+      }
+    }, 24 * 60 * 60 * 1000);
+  }, firstDelay);
 }
 
 async function start() {

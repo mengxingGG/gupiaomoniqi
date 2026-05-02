@@ -122,8 +122,20 @@ export default function TradePanel({ stock, compact = false }: TradePanelProps) 
         <div className="mb-2">
           <div className="text-xs text-gray-500 mb-1">委托价格</div>
           <input
-            type="number" step="0.01" value={limitPrice}
-            onChange={(e) => setLimitPrice(Math.max(0.01, parseFloat(e.target.value) || stock.currentPrice))}
+            type="number" step="0.01" 
+            value={limitPrice}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === '') {
+                setLimitPrice(0);
+              } else {
+                const parsed = parseFloat(val);
+                if (!isNaN(parsed) && parsed > 0) {
+                  setLimitPrice(parsed);
+                }
+              }
+            }}
+            placeholder="输入委托价格"
             className="w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-number"
           />
         </div>

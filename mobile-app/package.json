@@ -1,0 +1,32 @@
+{
+  "name": "mobile-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npx vite",
+    "build": "npx vite build",
+    "build:check": "npx vue-tsc -b && npx vite build",
+    "preview": "npx vite preview"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/cli": "^8.2.0",
+    "@capacitor/core": "^8.2.0",
+    "axios": "^1.13.6",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.25",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@vant/auto-import-resolver": "^1.3.0",
+    "@vitejs/plugin-vue": "^6.0.4",
+    "@vue/tsconfig": "^0.8.1",
+    "typescript": "~5.9.3",
+    "unplugin-vue-components": "^31.0.0",
+    "vant": "^4.9.22",
+    "vite": "^5.4.21",
+    "vue-tsc": "^3.2.5"
+  }
+}

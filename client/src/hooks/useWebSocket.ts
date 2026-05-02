@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { useMarketStore } from '../store/useMarketStore'
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:3001'
+// 使用相对路径走 Vite 代理
+const WS_URL = import.meta.env.VITE_WS_URL || ''
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)

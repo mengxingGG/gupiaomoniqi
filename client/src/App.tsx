@@ -7,42 +7,54 @@ import LoginPage from './pages/LoginPage'
 import MainLayout from './components/layout/MainLayout'
 
 function AppContent() {
-  const { token, fetchMe } = useAuthStore()
+  const { token, user, fetchMe, clearAuth } = useAuthStore()
   const { fetchStocks } = useMarketStore()
   const { fetchPositions, fetchOrders, fetchLoans, fetchTransactions } = useGameStore()
   const [initializing, setInitializing] = useState(true)
+  const [initStarted, setInitStarted] = useState(false)
 
   // Connect WebSocket for real-time price updates
   useWebSocket()
 
   useEffect(() => {
+    // 防止重复初始化
+    if (initStarted) return
+    setInitStarted(true)
+
     const init = async () => {
-      if (token) {
-        try {
-          await fetchMe()
-          // Load initial data in parallel
-          await Promise.all([
-            fetchStocks(),
-            fetchPositions(),
-            fetchOrders(),
-            fetchLoans(),
-            fetchTransactions(),
-          ])
-        } catch {
-          // fetchMe failure means invalid token - handled by axios interceptor (401 -> logout)
+      try {
+        // 总是加载公开的市场数据
+        await fetchStocks()
+        
+        // 如果有token，尝试验证并加载用户数据
+        if (token) {
+          try {
+            await fetchMe()
+            // 验证成功后加载其他数据
+            await Promise.all([
+              fetchPositions(),
+              fetchOrders(),
+              fetchLoans(),
+              fetchTransactions(),
+            ])
+          } catch (err: any) {
+            // fetchMe 失败，token无效，清除认证状态
+            if (err?.response?.status === 401) {
+              clearAuth()
+            }
+            // 其他错误忽略，保持当前状态
+          }
         }
-      } else {
-        // No token, still load market data for display
-        try {
-          await fetchStocks()
-        } catch {
-          // ignore
-        }
+      } catch (err) {
+        // 市场数据加载失败，忽略
+        console.error('初始化失败:', err)
+      } finally {
+        setInitializing(false)
       }
-      setInitializing(false)
     }
+    
     init()
-  }, [token])
+  }, [token, initStarted])
 
   if (initializing) {
     return (
@@ -55,11 +67,13 @@ function AppContent() {
     )
   }
 
-  if (!token) {
-    return <LoginPage />
+  // 有token且用户信息已加载完成，显示主界面
+  if (token && user) {
+    return <MainLayout />
   }
 
-  return <MainLayout />
+  // 其他情况显示登录页
+  return <LoginPage />
 }
 
 export default function App() {

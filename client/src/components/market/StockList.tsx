@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useMarketStore, type StockData } from '../../store/useMarketStore'
 import { useUIStore } from '../../store/useUIStore'
 
@@ -6,13 +7,20 @@ interface StockListProps {
   onSelect?: (stock: StockData) => void
 }
 
+type SortMode = 'none' | 'up' | 'down'
+
 export default function StockList({ stocks, onSelect }: StockListProps) {
   const { selectStock, selectedStock } = useMarketStore()
   const { searchQuery, setSearchQuery } = useUIStore()
+  const [sortMode, setSortMode] = useState<SortMode>('none')
 
-  const filtered = stocks.filter(
-    s => s.code.includes(searchQuery) || s.name.includes(searchQuery)
-  )
+  const filtered = stocks
+    .filter(s => s.code.includes(searchQuery) || s.name.includes(searchQuery))
+    .sort((a, b) => {
+      if (sortMode === 'up') return b.changePercent - a.changePercent
+      if (sortMode === 'down') return a.changePercent - b.changePercent
+      return 0
+    })
 
   const up = (n: number) => n >= 0
   const fmt = (n: number) => n.toFixed(2)
@@ -20,6 +28,10 @@ export default function StockList({ stocks, onSelect }: StockListProps) {
   const handleClick = (stock: StockData) => {
     selectStock(stock)
     onSelect?.(stock)
+  }
+
+  const toggleSort = (mode: SortMode) => {
+    setSortMode(sortMode === mode ? 'none' : mode)
   }
 
   return (
@@ -38,7 +50,16 @@ export default function StockList({ stocks, onSelect }: StockListProps) {
       <div className="grid grid-cols-3 px-2 py-1 text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-700/30 border-b border-gray-100 dark:border-gray-700">
         <span>名称/代码</span>
         <span className="text-right">现价</span>
-        <span className="text-right">涨跌幅</span>
+        <button
+          onClick={() => toggleSort(sortMode === 'up' ? 'down' : 'up')}
+          className={`text-right flex items-center justify-end gap-1 hover:text-gray-600 dark:hover:text-gray-300 ${
+            sortMode !== 'none' ? 'text-primary' : ''
+          }`}
+        >
+          涨跌幅
+          {sortMode === 'up' && <span>↑</span>}
+          {sortMode === 'down' && <span>↓</span>}
+        </button>
       </div>
 
       {/* 股票列表 */}
