@@ -58,6 +58,7 @@ API_KEYS.md
 .env
 .env.backup
 .env.local
+!.env.example
 
 # SQLite WAL
 *.db-shm
