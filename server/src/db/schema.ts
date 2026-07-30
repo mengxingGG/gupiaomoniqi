@@ -1,164 +1,580 @@
-import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+  bigint,
+  boolean,
+  index,
+  integer,
+  jsonb,
+  numeric,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
 
-// 账户表（登录凭据）
-export const accounts = sqliteTable('accounts', {
-  id: text('id').primaryKey(),
-  username: text('username').unique().notNull(),
-  passwordHash: text('password_hash').notNull(),
-  displayName: text('display_name').notNull(),
-  createdAt: integer('created_at').notNull(),
-  lastLoginAt: integer('last_login_at'),
+export const accounts = pgTable(
+  "accounts",
+  {
+    id: uuid("id").primaryKey(),
+    username: text("username").notNull(),
+    usernameNormalized: text("username_normalized").notNull(),
+    passwordHash: text("password_hash").notNull(),
+    displayName: text("display_name").notNull(),
+    displayCurrency: text("display_currency").notNull().default("USD"),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    lastLoginAt: timestamp("last_login_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+  },
+  (table) => [
+    uniqueIndex("accounts_username_normalized_unique").on(
+      table.usernameNormalized,
+    ),
+  ],
+);
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("sessions_account_index").on(table.accountId)],
+);
+
+export const marketImportBatches = pgTable("market_import_batches", {
+  id: uuid("id").primaryKey(),
+  source: text("source").notNull(),
+  sourceHost: text("source_host").notNull(),
+  sourceFetchedAt: timestamp("source_fetched_at", {
+    withTimezone: true,
+    mode: "date",
+  }).notNull(),
+  importedAt: timestamp("imported_at", {
+    withTimezone: true,
+    mode: "date",
+  })
+    .notNull()
+    .defaultNow(),
+  selection: text("selection").notNull(),
+  requestedPerMarket: integer("requested_per_market").notNull(),
+  instrumentCount: integer("instrument_count").notNull(),
+  marketCounts: jsonb("market_counts")
+    .$type<Record<string, number>>()
+    .notNull(),
+  fxRates: jsonb("fx_rates")
+    .$type<{
+      asOf: string;
+      source: string;
+      HKD_CNY: number;
+      GBP_USD: number;
+    }>()
+    .notNull(),
+  snapshotSha256: text("snapshot_sha256").notNull(),
 });
 
-// 玩家档案（1:1 绑定账户）
-export const players = sqliteTable('players', {
-  id: text('id').primaryKey().references(() => accounts.id, { onDelete: 'cascade' }),
-  cash: real('cash').notNull().default(1000000),
-  initialCash: real('initial_cash').notNull().default(1000000),
-  totalAssets: real('total_assets').notNull().default(1000000),
-  tradingDay: integer('trading_day').notNull().default(1),
-  isPaused: integer('is_paused').notNull().default(0),
-  updatedAt: integer('updated_at').notNull(),
+export const instruments = pgTable(
+  "instruments",
+  {
+    id: text("id").primaryKey(),
+    symbol: text("symbol").notNull(),
+    name: text("name").notNull(),
+    market: text("market").notNull(),
+    type: text("type").notNull().default("STOCK_VIRTUAL"),
+    industry: text("industry").notNull(),
+    sourceCurrency: text("source_currency").notNull(),
+    quoteCurrency: text("settlement_currency").notNull(),
+    sourceMarketCode: integer("source_market_code"),
+    sourceSecid: text("source_secid").notNull(),
+    sourcePriceUnit: text("source_price_unit").notNull(),
+    sourceInitialPrice: numeric("source_initial_price", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    sourcePreviousClose: numeric("source_previous_close", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    initialPrice: numeric("initial_price", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    lotSize: integer("lot_size").notNull(),
+    settlementCycle: text("settlement_cycle")
+      .notNull()
+      .default("T0"),
+    volatility: numeric("volatility", {
+      precision: 10,
+      scale: 8,
+      mode: "number",
+    }).notNull(),
+    liquidity: integer("liquidity").notNull(),
+    sourceVolume: bigint("source_volume", { mode: "number" })
+      .notNull()
+      .default(0),
+    sourceTurnover: numeric("source_turnover", {
+      precision: 28,
+      scale: 2,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    totalMarketCap: numeric("total_market_cap", {
+      precision: 28,
+      scale: 2,
+      mode: "number",
+    }),
+    circulatingMarketCap: numeric("circulating_market_cap", {
+      precision: 28,
+      scale: 2,
+      mode: "number",
+    }),
+    isTradable: boolean("is_tradable").notNull().default(true),
+    importBatchId: uuid("import_batch_id")
+      .notNull()
+      .references(() => marketImportBatches.id),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("instruments_market_symbol_unique").on(
+      table.market,
+      table.symbol,
+    ),
+    index("instruments_market_index").on(table.market),
+    index("instruments_settlement_currency_index").on(
+      table.quoteCurrency,
+    ),
+  ],
+);
+
+export const quotes = pgTable("quotes", {
+  instrumentId: text("instrument_id")
+    .primaryKey()
+    .references(() => instruments.id, { onDelete: "cascade" }),
+  currentPrice: numeric("current_price", {
+    precision: 24,
+    scale: 4,
+    mode: "number",
+  }).notNull(),
+  previousClose: numeric("previous_close", {
+    precision: 24,
+    scale: 4,
+    mode: "number",
+  }).notNull(),
+  openPrice: numeric("open_price", {
+    precision: 24,
+    scale: 4,
+    mode: "number",
+  }).notNull(),
+  highPrice: numeric("high_price", {
+    precision: 24,
+    scale: 4,
+    mode: "number",
+  }).notNull(),
+  lowPrice: numeric("low_price", {
+    precision: 24,
+    scale: 4,
+    mode: "number",
+  }).notNull(),
+  volume: bigint("volume", { mode: "number" }).notNull().default(0),
+  changeAmount: numeric("change_amount", {
+    precision: 24,
+    scale: 4,
+    mode: "number",
+  })
+    .notNull()
+    .default(0),
+  changePercent: numeric("change_percent", {
+    precision: 12,
+    scale: 6,
+    mode: "number",
+  })
+    .notNull()
+    .default(0),
+  updatedAt: timestamp("updated_at", {
+    withTimezone: true,
+    mode: "date",
+  })
+    .notNull()
+    .defaultNow(),
 });
 
-// 持仓表
-export const positions = sqliteTable('positions', {
-  id: text('id').primaryKey(),
-  playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
-  stockCode: text('stock_code').notNull(),
-  stockName: text('stock_name').notNull(),
-  market: text('market').notNull(),
-  quantity: integer('quantity').notNull(),
-  availableQuantity: integer('available_quantity').notNull().default(0),
-  averageCost: real('average_cost').notNull(),
-  totalCost: real('total_cost').notNull(),
-  buyDate: integer('buy_date').notNull(),
-}, (table) => ({
-  playerStockIdx: uniqueIndex('player_stock_idx').on(table.playerId, table.stockCode),
-}));
+export const candles = pgTable(
+  "candles",
+  {
+    instrumentId: text("instrument_id")
+      .notNull()
+      .references(() => instruments.id, { onDelete: "cascade" }),
+    interval: text("interval").notNull(),
+    bucketStart: timestamp("bucket_start", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    open: numeric("open", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    high: numeric("high", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    low: numeric("low", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    close: numeric("close", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    volume: bigint("volume", { mode: "number" }).notNull().default(0),
+    source: text("source").notNull(),
+    isPartial: boolean("is_partial").notNull().default(true),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "candles_primary_key",
+      columns: [table.instrumentId, table.interval, table.bucketStart],
+    }),
+    index("candles_instrument_interval_time_index").on(
+      table.instrumentId,
+      table.interval,
+      table.bucketStart,
+    ),
+  ],
+);
 
-// 订单表
-export const orders = sqliteTable('orders', {
-  id: text('id').primaryKey(),
-  playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
-  stockCode: text('stock_code').notNull(),
-  stockName: text('stock_name').notNull(),
-  type: text('type').notNull(), // 'BUY' | 'SELL'
-  orderMode: text('order_mode').notNull(), // 'MARKET' | 'LIMIT'
-  quantity: integer('quantity').notNull(),
-  price: real('price'),
-  executedPrice: real('executed_price'),
-  status: text('status').notNull().default('PENDING'), // 'PENDING' | 'EXECUTED' | 'CANCELLED'
-  fee: real('fee').notNull().default(0),
-  createdAt: integer('created_at').notNull(),
-  executedAt: integer('executed_at'),
-});
+export const portfolios = pgTable("portfolios", {
+  id: uuid("id").primaryKey(),
+  accountId: uuid("account_id").references(() => accounts.id, {
+    onDelete: "cascade",
+  }),
+  name: text("name").notNull(),
+  mode: text("mode").notNull().default("VIRTUAL"),
+  activeCurrency: text("active_currency").notNull().default("CNY"),
+  initialCashUsd: numeric("initial_cash_usd", {
+    precision: 24,
+    scale: 2,
+    mode: "number",
+  })
+    .notNull()
+    .default(0),
+  availableCashUsd: numeric("available_cash_usd", {
+    precision: 24,
+    scale: 2,
+    mode: "number",
+  })
+    .notNull()
+    .default(0),
+  frozenCashUsd: numeric("frozen_cash_usd", {
+    precision: 24,
+    scale: 2,
+    mode: "number",
+  })
+    .notNull()
+    .default(0),
+  createdAt: timestamp("created_at", {
+    withTimezone: true,
+    mode: "date",
+  })
+    .notNull()
+    .defaultNow(),
+}, (table) => [
+  uniqueIndex("portfolios_account_unique").on(table.accountId),
+]);
 
-// 交易记录表
-export const transactions = sqliteTable('transactions', {
-  id: text('id').primaryKey(),
-  playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
-  stockCode: text('stock_code').notNull(),
-  stockName: text('stock_name').notNull(),
-  type: text('type').notNull(), // 'BUY' | 'SELL'
-  quantity: integer('quantity').notNull(),
-  price: real('price').notNull(),
-  total: real('total').notNull(),
-  fee: real('fee').notNull().default(0),
-  createdAt: integer('created_at').notNull(),
-});
+export const portfolioBalances = pgTable(
+  "portfolio_balances",
+  {
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    currency: text("currency").notNull(),
+    initialCash: numeric("initial_cash", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    cash: numeric("cash", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.portfolioId, table.currency],
+      name: "portfolio_balances_primary_key",
+    }),
+  ],
+);
 
-// 借贷表
-export const loans = sqliteTable('loans', {
-  id: text('id').primaryKey(),
-  playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
-  principal: real('principal').notNull(),
-  interest: real('interest').notNull().default(0),
-  annualRate: real('annual_rate').notNull().default(0.17),
-  status: text('status').notNull().default('ACTIVE'), // 'ACTIVE' | 'REPAID'
-  borrowDate: integer('borrow_date').notNull(),
-  lastInterestAt: integer('last_interest_at').notNull(),
-});
+export const aiTraders = pgTable(
+  "ai_traders",
+  {
+    id: uuid("id").primaryKey(),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    strategy: text("strategy").notNull(),
+    psychology: text("psychology").notNull(),
+    riskLevel: integer("risk_level").notNull(),
+    activityLevel: integer("activity_level").notNull(),
+    preferredMarket: text("preferred_market").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    lastActionAt: timestamp("last_action_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    nextActionAt: timestamp("next_action_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    totalTrades: integer("total_trades").notNull().default(0),
+    winCount: integer("win_count").notNull().default(0),
+    lossCount: integer("loss_count").notNull().default(0),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ai_traders_portfolio_unique").on(table.portfolioId),
+    index("ai_traders_next_action_index").on(
+      table.isActive,
+      table.nextActionAt,
+    ),
+  ],
+);
 
-// 成就表
-export const achievements = sqliteTable('achievements', {
-  id: text('id').primaryKey(),
-  playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
-  achievementId: text('achievement_id').notNull(),
-  unlockedAt: integer('unlocked_at').notNull(),
-}, (table) => ({
-  playerAchievementIdx: uniqueIndex('player_achievement_idx').on(table.playerId, table.achievementId),
-}));
+export const positions = pgTable(
+  "positions",
+  {
+    id: uuid("id").primaryKey(),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    instrumentId: text("instrument_id")
+      .notNull()
+      .references(() => instruments.id),
+    quantity: integer("quantity").notNull(),
+    availableQuantity: integer("available_quantity").notNull(),
+    frozenQuantity: integer("frozen_quantity").notNull().default(0),
+    averageCost: numeric("average_cost", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    averageCostUsd: numeric("average_cost_usd", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("positions_portfolio_instrument_unique").on(
+      table.portfolioId,
+      table.instrumentId,
+    ),
+  ],
+);
 
-// 礼包码使用记录
-export const giftCodeUsage = sqliteTable('gift_code_usage', {
-  playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
-  code: text('code').notNull(),
-  usedAt: integer('used_at').notNull(),
-}, (table) => ({
-  playerCodeIdx: uniqueIndex('player_code_idx').on(table.playerId, table.code),
-}));
+export const transactions = pgTable(
+  "transactions",
+  {
+    id: uuid("id").primaryKey(),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    instrumentId: text("instrument_id")
+      .notNull()
+      .references(() => instruments.id),
+    currency: text("currency").notNull(),
+    side: text("side").notNull(),
+    quantity: integer("quantity").notNull(),
+    price: numeric("price", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    grossAmount: numeric("gross_amount", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    fee: numeric("fee", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    netAmount: numeric("net_amount", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    realizedProfit: numeric("realized_profit", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }),
+    quotePrice: numeric("quote_price", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }),
+    quoteCurrency: text("quote_currency"),
+    fxRateToUsd: numeric("fx_rate_to_usd", {
+      precision: 18,
+      scale: 10,
+      mode: "number",
+    }),
+    priceUsd: numeric("price_usd", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }),
+    grossAmountUsd: numeric("gross_amount_usd", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }),
+    feeUsd: numeric("fee_usd", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }),
+    netAmountUsd: numeric("net_amount_usd", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }),
+    realizedProfitUsd: numeric("realized_profit_usd", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    }),
+    actorType: text("actor_type").notNull().default("USER"),
+    actorId: text("actor_id"),
+    idempotencyKey: text("idempotency_key"),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("transactions_portfolio_created_index").on(
+      table.portfolioId,
+      table.createdAt,
+    ),
+    uniqueIndex("transactions_portfolio_idempotency_unique").on(
+      table.portfolioId,
+      table.idempotencyKey,
+    ),
+  ],
+);
 
-// 股票价格表（服务端维护）
-export const stocks = sqliteTable('stocks', {
-  code: text('code').primaryKey(),
-  name: text('name').notNull(),
-  market: text('market').notNull(),
-  industry: text('industry'),
-  currentPrice: real('current_price').notNull(),
-  previousClose: real('previous_close').notNull(),
-  openPrice: real('open_price').notNull(),
-  highPrice: real('high_price').notNull(),
-  lowPrice: real('low_price').notNull(),
-  volume: integer('volume').notNull().default(0),
-  turnover: real('turnover').notNull().default(0),
-  changePercent: real('change_percent').notNull().default(0),
-  changeAmount: real('change_amount').notNull().default(0),
-  priceHistory: text('price_history').notNull().default('[]'),
-  updatedAt: integer('updated_at').notNull(),
-});
-
-// AI 交易者表
-export const aiTraders = sqliteTable('ai_traders', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  cash: real('cash').notNull(),
-  totalAssets: real('total_assets').notNull(),
-  strategyType: text('strategy_type').notNull(),
-  psychologyType: text('psychology_type'),
-  isSmart: integer('is_smart').notNull().default(0), // 1 = LLM驱动
-  lastDecisionAt: integer('last_decision_at'),
-});
-
-// AI 持仓表
-export const aiPositions = sqliteTable('ai_positions', {
-  id: text('id').primaryKey(),
-  traderId: text('trader_id').notNull().references(() => aiTraders.id, { onDelete: 'cascade' }),
-  stockCode: text('stock_code').notNull(),
-  stockName: text('stock_name').notNull(),
-  quantity: integer('quantity').notNull(),
-  averageCost: real('average_cost').notNull(),
-});
-
-// 类型导出
-export type Account = typeof accounts.$inferSelect;
-export type NewAccount = typeof accounts.$inferInsert;
-export type Player = typeof players.$inferSelect;
-export type NewPlayer = typeof players.$inferInsert;
-export type Position = typeof positions.$inferSelect;
-export type NewPosition = typeof positions.$inferInsert;
-export type Order = typeof orders.$inferSelect;
-export type NewOrder = typeof orders.$inferInsert;
-export type Transaction = typeof transactions.$inferSelect;
-export type NewTransaction = typeof transactions.$inferInsert;
-export type Loan = typeof loans.$inferSelect;
-export type NewLoan = typeof loans.$inferInsert;
-export type Achievement = typeof achievements.$inferSelect;
-export type NewAchievement = typeof achievements.$inferInsert;
-export type GiftCodeUsageRecord = typeof giftCodeUsage.$inferSelect;
-export type Stock = typeof stocks.$inferSelect;
-export type NewStock = typeof stocks.$inferInsert;
-export type AITrader = typeof aiTraders.$inferSelect;
-export type NewAITrader = typeof aiTraders.$inferInsert;
-export type AIPosition = typeof aiPositions.$inferSelect;
-export type NewAIPosition = typeof aiPositions.$inferInsert;
+export const positionSettlementLots = pgTable(
+  "position_settlement_lots",
+  {
+    id: uuid("id").primaryKey(),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    instrumentId: text("instrument_id")
+      .notNull()
+      .references(() => instruments.id),
+    quantity: integer("quantity").notNull(),
+    unlockAt: timestamp("unlock_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    settledAt: timestamp("settled_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    sourceTransactionId: uuid("source_transaction_id").references(
+      () => transactions.id,
+      { onDelete: "cascade" },
+    ),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("position_settlement_transaction_unique").on(
+      table.sourceTransactionId,
+    ),
+    index("position_settlement_due_index").on(
+      table.settledAt,
+      table.unlockAt,
+    ),
+    index("position_settlement_position_index").on(
+      table.portfolioId,
+      table.instrumentId,
+    ),
+  ],
+);

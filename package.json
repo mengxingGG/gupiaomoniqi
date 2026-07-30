@@ -1,0 +1,48 @@
+{
+  "name": "gupiaomoniqi",
+  "version": "3.0.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "server",
+    "shared",
+    "web"
+  ],
+  "scripts": {
+    "data:seed": "node scripts/fetch-market-seeds.mjs --count 300",
+    "data:init": "tsx server/src/startup/localPrepare.ts",
+    "data:import": "tsx server/src/db/importMarketSeeds.ts",
+    "db:migrate": "tsx server/src/db/migrate.ts",
+    "db:inspect": "tsx server/src/db/inspect.ts",
+    "db:inspect:real": "tsx server/src/real-market/db/inspect.ts",
+    "local:prepare": "tsx server/src/startup/localPrepare.ts",
+    "ai:benchmark": "tsx scripts/benchmark-ai.ts",
+    "gift-code:add": "tsx scripts/add-gift-code.ts",
+    "dev": "concurrently -n server,web -c blue,green \"tsx watch server/src/index.ts\" \"vite --config web/vite.config.ts\"",
+    "dev:app": "concurrently -n server,web -c blue,green --kill-others \"tsx server/src/index.ts\" \"vite --config web/vite.config.ts\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "build": "tsc -p server/tsconfig.json && tsc -b web/tsconfig.json && vite build --config web/vite.config.ts",
+    "typecheck": "tsc -p server/tsconfig.json && tsc -b web/tsconfig.json",
+    "test": "vitest run --config server/vitest.config.ts",
+    "test:watch": "vitest --config server/vitest.config.ts",
+    "start": "node server/dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^10.0.4",
+    "drizzle-kit": "^0.31.10",
+    "tailwindcss": "^4.1.18",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,35 +1,15 @@
 {
-  "name": "stock-simulator-server",
-  "version": "2.0.0",
+  "name": "@gupiaomoniqi/server",
+  "version": "3.0.0-alpha.1",
+  "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "tsx src/app.ts",
-    "build": "tsc",
-    "start": "node dist/app.js",
-    "migrate": "tsx src/db/migrate.ts",
-    "benchmark": "tsx src/llm/ModelBenchmark.ts"
-  },
   "dependencies": {
-    "@fastify/cors": "^9.0.1",
-    "@fastify/jwt": "^8.0.1",
-    "@fastify/rate-limit": "^9.0.0",
-    "@fastify/websocket": "^10.0.1",
-    "@types/better-sqlite3": "^7.6.13",
-    "bcrypt": "^5.1.1",
-    "better-sqlite3": "^12.8.0",
-    "dotenv": "^16.6.1",
-    "drizzle-orm": "^0.30.10",
-    "fastify": "^4.28.1",
-    "uuid": "^9.0.1",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "@types/bcrypt": "^5.0.2",
-    "@types/node": "^20.12.12",
-    "@types/uuid": "^9.0.8",
-    "@types/ws": "^8.18.1",
-    "drizzle-kit": "^0.21.4",
-    "tsx": "^4.7.0",
-    "typescript": "^5.9.3"
+    "@electric-sql/pglite": "^0.5.4",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/websocket": "^11.3.0",
+    "@gupiaomoniqi/shared": "3.0.0-alpha.1",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.10.0",
+    "zod": "^4.4.3"
   }
 }

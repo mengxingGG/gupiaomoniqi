@@ -1,469 +1,356 @@
-import { dbUtils } from '../db/index.js';
-import { v4 as uuidv4 } from 'uuid';
-import { achievementService } from './AchievementService.js';
+import { randomUUID } from "node:crypto";
+import {
+  quotePriceToUsd,
+  USD_CNY_DISPLAY_RATE,
+  type TradeActorType,
+  type TradeRequest,
+  type TradeResult,
+  type Transaction,
+} from "@gupiaomoniqi/shared";
+import { GAME_RULES } from "../config.js";
+import { nextSettlementAt } from "../domain/marketRules.js";
+import { roundMoney, roundUnitPrice } from "../domain/money.js";
+import type {
+  GameRepository,
+  PositionRecord,
+  SettlementLotRecord,
+} from "../repositories/GameRepository.js";
+import type { PortfolioService } from "./PortfolioService.js";
 
-const FEE_RATE = 0.0003;
-
-interface StockRow {
-  code: string;
-  name: string;
-  market: string;
-  current_price: number;
-  previous_close: number;
-  high_price: number;
-  low_price: number;
-  volume: number;
-  turnover: number;
+export interface MarketImpactRecorder {
+  recordTrade(
+    instrumentId: string,
+    side: "BUY" | "SELL",
+    quantity: number,
+    actorType: TradeActorType,
+  ): void;
 }
 
-interface PlayerRow {
-  id: string;
-  cash: number;
-  initial_cash: number;
-  total_assets: number;
-  trading_day: number;
-  is_paused: number;
-  updated_at: number;
-}
-
-interface PositionRow {
-  id: string;
-  player_id: string;
-  stock_code: string;
-  stock_name: string;
-  market: string;
-  quantity: number;
-  available_quantity: number;
-  average_cost: number;
-  total_cost: number;
-  buy_date: number;
-}
-
-interface OrderRow {
-  id: string;
-  player_id: string;
-  stock_code: string;
-  stock_name: string;
-  type: string;
-  order_mode: string;
-  quantity: number;
-  price: number | null;
-  executed_price: number | null;
-  status: string;
-  fee: number;
-  created_at: number;
-  executed_at: number | null;
-}
-
-export interface TradeInput {
-  playerId: string;
-  stockCode: string;
-  quantity: number;
-  orderMode: 'MARKET' | 'LIMIT';
-  price?: number;
-}
-
-// 计算玩家总资产（现金 + 持仓市值）
-function calcTotalAssets(playerId: string, cash: number): number {
-  const positions = dbUtils.query<PositionRow>(
-    'SELECT p.quantity, s.current_price FROM positions p JOIN stocks s ON p.stock_code = s.code WHERE p.player_id = ?',
-    [playerId]
-  );
-  const positionsValue = positions.reduce((sum, p) => sum + p.quantity * (p as any).current_price, 0);
-  return cash + positionsValue;
+export class TradeError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly statusCode = 400,
+  ) {
+    super(message);
+    this.name = "TradeError";
+  }
 }
 
 export class TradeService {
-  // 判断是否为 T+0 市场
-  private isT0Market(market: string): boolean {
-    return market.endsWith('_T0');
-  }
+  #queue: Promise<void> = Promise.resolve();
 
-  // 买入
-  buy(input: TradeInput): { order: any; player: PlayerRow } {
-    const { playerId, stockCode, quantity, orderMode, price } = input;
+  constructor(
+    private readonly repository: GameRepository,
+    private readonly portfolioService: PortfolioService,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly marketImpact?: MarketImpactRecorder,
+  ) {}
 
-    // 1. 验证股票是否存在
-    const stock = dbUtils.queryOne<StockRow>(
-      'SELECT * FROM stocks WHERE code = ?',
-      [stockCode]
-    );
-    if (!stock) {
-      throw new Error('STOCK_NOT_FOUND');
-    }
+  execute(
+    accountId: string,
+    request: TradeRequest,
+  ): Promise<TradeResult> {
+    return this.#enqueue(async () => {
+      const portfolio =
+        this.repository.getPortfolioByAccountId(accountId);
 
-    // 2. 获取当前玩家资金
-    const player = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [playerId]
-    );
-    if (!player) {
-      throw new Error('PLAYER_NOT_FOUND');
-    }
-
-    // 3. 计算成交价格
-    let executionPrice = orderMode === 'MARKET' ? stock.current_price : (price || stock.current_price);
-
-    // 4. 计算所需资金
-    const totalCost = executionPrice * quantity;
-    const fee = totalCost * FEE_RATE;
-    const totalWithFee = totalCost + fee;
-
-    // 5. 验证资金是否充足
-    if (player.cash < totalWithFee) {
-      throw new Error('INSUFFICIENT_FUNDS');
-    }
-
-    const now = Date.now();
-
-    // 6. 判断是否立即成交或挂单
-    let shouldPending = false;
-    
-    if (orderMode === 'LIMIT' && price !== undefined) {
-      const currentPx = stock.current_price;
-      // 买单：股价 > 限价时挂单等待，股价 <= 限价时成交
-      // 卖单：股价 < 限价时挂单等待，股价 >= 限价时成交
-      if (currentPx > price) {
-        shouldPending = true;
-        executionPrice = price;
+      if (!portfolio) {
+        throw new TradeError(
+          "PORTFOLIO_NOT_FOUND",
+          "模拟账户不存在",
+          404,
+        );
       }
-    }
 
-    // 7. 创建订单
-    const orderId = uuidv4();
-    const newOrder: OrderRow = {
-      id: orderId,
-      player_id: playerId,
-      stock_code: stockCode,
-      stock_name: stock.name,
-      type: 'BUY',
-      order_mode: orderMode,
-      quantity,
-      price: orderMode === 'LIMIT' ? price! : null,
-      executed_price: executionPrice,
-      status: shouldPending ? 'PENDING' : 'EXECUTED',
-      fee: 0,
-      created_at: now,
-      executed_at: shouldPending ? null : now,
-    };
-
-    dbUtils.transaction(() => {
-      dbUtils.run(
-        'INSERT INTO orders (id, player_id, stock_code, stock_name, type, order_mode, quantity, price, executed_price, status, fee, created_at, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [newOrder.id, newOrder.player_id, newOrder.stock_code, newOrder.stock_name, newOrder.type, newOrder.order_mode, newOrder.quantity, newOrder.price, newOrder.executed_price, newOrder.status, newOrder.fee, newOrder.created_at, newOrder.executed_at]
+      const transaction = await this.#executePortfolio(
+        portfolio.id,
+        request,
+        "USER",
+        accountId,
       );
 
-      if (shouldPending) {
-        // 限价挂单：冻结资金
-        const totalCost = executionPrice * quantity;
-        const fee = totalCost * FEE_RATE;
-        const totalWithFee = totalCost + fee;
-        dbUtils.run(
-          'UPDATE players SET cash = cash - ?, updated_at = ? WHERE id = ?',
-          [totalWithFee, now, playerId]
-        );
-      } else {
-        // 7. 更新或创建持仓
-        const existingPosition = dbUtils.queryOne<PositionRow>(
-          'SELECT * FROM positions WHERE player_id = ? AND stock_code = ?',
-          [playerId, stockCode]
+      return {
+        transaction,
+        portfolio: this.portfolioService.getSnapshot(accountId),
+      };
+    });
+  }
+
+  executeAI(
+    traderId: string,
+    portfolioId: string,
+    request: TradeRequest,
+  ): Promise<Transaction> {
+    return this.#enqueue(() =>
+      this.#executePortfolio(
+        portfolioId,
+        request,
+        "AI",
+        traderId,
+      ),
+    );
+  }
+
+  settleDuePositions(at: Date = this.clock()) {
+    return this.#enqueue(() =>
+      this.repository.settleDuePositions(at.toISOString()),
+    );
+  }
+
+  #enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.#queue.then(work);
+    this.#queue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  async #executePortfolio(
+    portfolioId: string,
+    request: TradeRequest,
+    actorType: TradeActorType,
+    actorId: string,
+  ): Promise<Transaction> {
+    const now = this.clock();
+    await this.repository.settleDuePositions(now.toISOString());
+    const portfolio = this.repository.getPortfolioById(portfolioId);
+
+    if (!portfolio) {
+      throw new TradeError(
+        "PORTFOLIO_NOT_FOUND",
+        "模拟账户不存在",
+        404,
+      );
+    }
+
+    if (request.idempotencyKey) {
+      const existing =
+        this.repository.getTransactionByIdempotencyKey(
+          portfolio.id,
+          request.idempotencyKey,
         );
 
-        if (!existingPosition) {
-          dbUtils.run(
-            'INSERT INTO positions (id, player_id, stock_code, stock_name, market, quantity, available_quantity, average_cost, total_cost, buy_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [uuidv4(), playerId, stockCode, stock.name, stock.market, quantity, this.isT0Market(stock.market) ? quantity : 0, executionPrice, totalCost, now]
-          );
-        } else {
-          const newQuantity = existingPosition.quantity + quantity;
-          const newTotalCost = existingPosition.total_cost + totalCost;
-          const newAvgCost = newTotalCost / newQuantity;
-          dbUtils.run(
-            'UPDATE positions SET quantity = ?, available_quantity = ?, average_cost = ?, total_cost = ? WHERE id = ?',
-            [newQuantity, this.isT0Market(stock.market) ? existingPosition.available_quantity + quantity : existingPosition.available_quantity, newAvgCost, newTotalCost, existingPosition.id]
+      if (existing) {
+        if (
+          existing.instrumentId !== request.instrumentId ||
+          existing.side !== request.side ||
+          existing.quantity !== request.quantity
+        ) {
+          throw new TradeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "这次交易请求标识已经用于另一笔订单",
+            409,
           );
         }
 
-        // 8. 更新玩家资金
-        dbUtils.run(
-          'UPDATE players SET cash = cash - ?, updated_at = ? WHERE id = ?',
-          [totalWithFee, now, playerId]
-        );
-        dbUtils.run(
-          'INSERT INTO transactions (id, player_id, stock_code, stock_name, type, quantity, price, total, fee, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [uuidv4(), playerId, stockCode, stock.name, 'BUY', quantity, executionPrice, totalCost, fee, now]
+        return existing;
+      }
+    }
+
+    const instrument = this.repository.getInstrumentById(
+      request.instrumentId,
+    );
+
+    if (!instrument || instrument.type !== "STOCK_VIRTUAL") {
+      throw new TradeError(
+        "INSTRUMENT_NOT_FOUND",
+        "没有找到这只模拟股票",
+        404,
+      );
+    }
+
+    if (!instrument.isTradable) {
+      throw new TradeError(
+        "INSTRUMENT_NOT_TRADABLE",
+        "这只股票当前不可交易",
+      );
+    }
+
+    if (
+      !Number.isSafeInteger(request.quantity) ||
+      request.quantity <= 0 ||
+      request.quantity % instrument.lotSize !== 0
+    ) {
+      throw new TradeError(
+        "INVALID_QUANTITY",
+        `交易数量必须是 ${instrument.lotSize} 股的正整数倍`,
+      );
+    }
+
+    if (request.orderMode && request.orderMode !== "MARKET") {
+      throw new TradeError(
+        "ORDER_MODE_NOT_SUPPORTED",
+        "当前阶段只支持市价单",
+      );
+    }
+
+    const quote = this.repository.getQuote(instrument.id);
+
+    if (!quote) {
+      throw new TradeError(
+        "QUOTE_UNAVAILABLE",
+        "这只股票暂时没有可用行情",
+        503,
+      );
+    }
+
+    const fxRateToUsd =
+      quote.quoteCurrency === "CNY"
+        ? 1 / USD_CNY_DISPLAY_RATE
+        : 1;
+    const priceUsd = roundUnitPrice(
+      quotePriceToUsd(quote.currentPrice, quote.quoteCurrency),
+    );
+    const grossAmountUsd = roundMoney(priceUsd * request.quantity);
+    const feeUsd = roundMoney(
+      Math.max(
+        GAME_RULES.minimumFeeUsd,
+        grossAmountUsd * GAME_RULES.feeRate,
+      ),
+    );
+    const oldPosition = this.repository.getPosition(
+      portfolio.id,
+      instrument.id,
+    );
+    let realizedProfitUsd: number | null = null;
+    let netAmountUsd: number;
+    let availableCashUsd: number;
+    let position: PositionRecord | null;
+
+    if (request.side === "BUY") {
+      netAmountUsd = roundMoney(grossAmountUsd + feeUsd);
+
+      if (portfolio.availableCashUsd < netAmountUsd) {
+        throw new TradeError(
+          "INSUFFICIENT_CASH",
+          "可用模拟资金不足",
         );
       }
+
+      const oldQuantity = oldPosition?.quantity ?? 0;
+      const newQuantity = oldQuantity + request.quantity;
+      const oldCostUsd =
+        (oldPosition?.averageCostUsd ?? 0) * oldQuantity;
+      const averageCostUsd = roundUnitPrice(
+        (oldCostUsd + grossAmountUsd + feeUsd) / newQuantity,
+      );
+
+      availableCashUsd = roundMoney(
+        portfolio.availableCashUsd - netAmountUsd,
+      );
+      position = {
+        id: oldPosition?.id ?? randomUUID(),
+        instrumentId: instrument.id,
+        quantity: newQuantity,
+        availableQuantity:
+          (oldPosition?.availableQuantity ?? 0) +
+          (instrument.settlementCycle === "T0"
+            ? request.quantity
+            : 0),
+        frozenQuantity: oldPosition?.frozenQuantity ?? 0,
+        averageCostUsd,
+      };
+    } else {
+      if (
+        !oldPosition ||
+        oldPosition.availableQuantity < request.quantity
+      ) {
+        throw new TradeError(
+          "INSUFFICIENT_POSITION",
+          instrument.settlementCycle === "T1"
+            ? "可卖持仓不足；沪深当日买入需下一交易日方可卖出"
+            : "可卖持仓不足",
+        );
+      }
+
+      netAmountUsd = roundMoney(grossAmountUsd - feeUsd);
+      realizedProfitUsd = roundMoney(
+        (priceUsd - oldPosition.averageCostUsd) * request.quantity -
+          feeUsd,
+      );
+      const remainingQuantity =
+        oldPosition.quantity - request.quantity;
+
+      availableCashUsd = roundMoney(
+        portfolio.availableCashUsd + netAmountUsd,
+      );
+      position =
+        remainingQuantity === 0
+          ? null
+          : {
+              ...oldPosition,
+              quantity: remainingQuantity,
+              availableQuantity:
+                oldPosition.availableQuantity - request.quantity,
+            };
+    }
+
+    const transactionId = randomUUID();
+    const transaction: Transaction = {
+      id: transactionId,
+      instrumentId: instrument.id,
+      symbol: instrument.symbol,
+      name: instrument.name,
+      market: instrument.market,
+      side: request.side,
+      quantity: request.quantity,
+      quotePrice: quote.currentPrice,
+      quoteCurrency: quote.quoteCurrency,
+      fxRateToUsd,
+      priceUsd,
+      grossAmountUsd,
+      feeUsd,
+      netAmountUsd,
+      realizedProfitUsd,
+      createdAt: now.toISOString(),
+      actorType,
+      actorId,
+      idempotencyKey: request.idempotencyKey,
+    };
+    let settlementLot: SettlementLotRecord | undefined;
+    const persistTransaction = actorType !== "AI";
+
+    if (
+      request.side === "BUY" &&
+      instrument.settlementCycle === "T1"
+    ) {
+      const unlockAt = nextSettlementAt(instrument.market, now);
+
+      if (!unlockAt) {
+        throw new Error("T1_SETTLEMENT_DATE_UNAVAILABLE");
+      }
+
+      settlementLot = {
+        id: randomUUID(),
+        portfolioId: portfolio.id,
+        instrumentId: instrument.id,
+        quantity: request.quantity,
+        unlockAt: unlockAt.toISOString(),
+        settledAt: null,
+        sourceTransactionId: persistTransaction
+          ? transactionId
+          : null,
+      };
+    }
+
+    await this.repository.commitTrade({
+      portfolioId: portfolio.id,
+      instrumentId: instrument.id,
+      occurredAt: now.toISOString(),
+      availableCashUsd,
+      position,
+      transaction: persistTransaction ? transaction : undefined,
+      settlementLot,
     });
-
-    // 10. 重新获取更新后的玩家数据并计算总资产
-    const updatedPlayer = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [playerId]
+    this.marketImpact?.recordTrade(
+      instrument.id,
+      request.side,
+      request.quantity,
+      actorType,
     );
 
-    const totalAssets = calcTotalAssets(playerId, updatedPlayer!.cash);
-    dbUtils.run(
-      'UPDATE players SET total_assets = ? WHERE id = ?',
-      [totalAssets, playerId]
-    );
-    updatedPlayer!.total_assets = totalAssets;
-
-    // 检查并解锁成就
-    try {
-      achievementService.checkAchievements(playerId);
-    } catch (e) {
-      console.error('检查成就失败:', e);
-    }
-
-    return {
-      order: newOrder,
-      player: updatedPlayer!,
-    };
-  }
-
-  // 卖出
-  sell(input: TradeInput): { order: any; player: PlayerRow } {
-    const { playerId, stockCode, quantity, orderMode, price } = input;
-
-    // 1. 验证持仓
-    const position = dbUtils.queryOne<PositionRow>(
-      'SELECT * FROM positions WHERE player_id = ? AND stock_code = ?',
-      [playerId, stockCode]
-    );
-    if (!position) {
-      throw new Error('NO_POSITION');
-    }
-
-    // 2. 验证可卖出数量
-    if (position.available_quantity < quantity) {
-      throw new Error('INSUFFICIENT_AVAILABLE_QUANTITY');
-    }
-
-    // 3. 获取股票
-    const stock = dbUtils.queryOne<StockRow>(
-      'SELECT * FROM stocks WHERE code = ?',
-      [stockCode]
-    );
-    if (!stock) {
-      throw new Error('STOCK_NOT_FOUND');
-    }
-
-    // 4. 计算成交价格
-    let executionPrice = orderMode === 'MARKET' ? stock.current_price : (price || stock.current_price);
-
-    // 5. 计算所得
-    const totalProceeds = executionPrice * quantity;
-    const fee = totalProceeds * FEE_RATE;
-    const netProceeds = totalProceeds - fee;
-
-    // 6. 判断是否立即成交或挂单
-    let shouldPending = false;
-    
-    if (orderMode === 'LIMIT' && price !== undefined) {
-      const currentPx = stock.current_price;
-      // 卖单：股价 < 限价时挂单等待，股价 >= 限价时成交
-      if (currentPx < price) {
-        shouldPending = true;
-        executionPrice = price;
-      }
-    }
-
-    // 7. 获取玩家
-    const player = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [playerId]
-    );
-    if (!player) {
-      throw new Error('PLAYER_NOT_FOUND');
-    }
-
-    const now = Date.now();
-
-    // 8. 创建订单
-    const orderId = uuidv4();
-    const newOrder: OrderRow = {
-      id: orderId,
-      player_id: playerId,
-      stock_code: stockCode,
-      stock_name: stock.name,
-      type: 'SELL',
-      order_mode: orderMode,
-      quantity,
-      price: orderMode === 'LIMIT' ? price! : null,
-      executed_price: executionPrice,
-      status: shouldPending ? 'PENDING' : 'EXECUTED',
-      fee: 0,
-      created_at: now,
-      executed_at: shouldPending ? null : now,
-    };
-
-    dbUtils.transaction(() => {
-      dbUtils.run(
-        'INSERT INTO orders (id, player_id, stock_code, stock_name, type, order_mode, quantity, price, executed_price, status, fee, created_at, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [newOrder.id, newOrder.player_id, newOrder.stock_code, newOrder.stock_name, newOrder.type, newOrder.order_mode, newOrder.quantity, newOrder.price, newOrder.executed_price, newOrder.status, newOrder.fee, newOrder.created_at, newOrder.executed_at]
-      );
-
-      if (shouldPending) {
-        // 限价挂单：冻结持仓（不可卖出）
-        dbUtils.run(
-          'UPDATE positions SET available_quantity = available_quantity - ? WHERE id = ?',
-          [quantity, position.id]
-        );
-      } else {
-        // 8. 更新持仓
-        const newQuantity = position.quantity - quantity;
-        if (newQuantity <= 0) {
-          dbUtils.run('DELETE FROM positions WHERE id = ?', [position.id]);
-        } else {
-          const newTotalCost = position.total_cost * (newQuantity / position.quantity);
-          dbUtils.run(
-            'UPDATE positions SET quantity = ?, available_quantity = ?, total_cost = ? WHERE id = ?',
-            [newQuantity, position.available_quantity - quantity, newTotalCost, position.id]
-          );
-        }
-
-        // 9. 更新玩家资金
-        dbUtils.run(
-          'UPDATE players SET cash = cash + ?, updated_at = ? WHERE id = ?',
-          [netProceeds, now, playerId]
-        );
-
-        // 10. 创建交易记录
-        dbUtils.run(
-          'INSERT INTO transactions (id, player_id, stock_code, stock_name, type, quantity, price, total, fee, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [uuidv4(), playerId, stockCode, stock.name, 'SELL', quantity, executionPrice, totalProceeds, fee, now]
-        );
-      }
-    });
-
-    // 11. 重新获取玩家数据并计算总资产
-    const updatedPlayer = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [playerId]
-    );
-
-    const totalAssets = calcTotalAssets(playerId, updatedPlayer!.cash);
-    dbUtils.run(
-      'UPDATE players SET total_assets = ? WHERE id = ?',
-      [totalAssets, playerId]
-    );
-    updatedPlayer!.total_assets = totalAssets;
-
-    // 检查并解锁成就
-    try {
-      achievementService.checkAchievements(playerId);
-    } catch (e) {
-      console.error('检查成就失败:', e);
-    }
-
-    return {
-      order: newOrder,
-      player: updatedPlayer!,
-    };
-  }
-
-  // 撤单
-  cancel(orderId: string, playerId: string): { order: any; player: PlayerRow } {
-    const order = dbUtils.queryOne<OrderRow>(
-      'SELECT * FROM orders WHERE id = ? AND player_id = ?',
-      [orderId, playerId]
-    );
-    if (!order) {
-      throw new Error('ORDER_NOT_FOUND');
-    }
-    if (order.status !== 'PENDING') {
-      throw new Error('ORDER_NOT_PENDING');
-    }
-
-    const now = Date.now();
-
-    // 更新订单状态
-    dbUtils.run(
-      'UPDATE orders SET status = ?, executed_at = ? WHERE id = ?',
-      ['CANCELLED', now, orderId]
-    );
-
-    // 如果是买单，返还资金（本金 + 手续费）
-    if (order.type === 'BUY' && order.executed_price) {
-      const refundAmount = order.executed_price * order.quantity + order.fee;
-      dbUtils.run(
-        'UPDATE players SET cash = cash + ?, updated_at = ? WHERE id = ?',
-        [refundAmount, now, playerId]
-      );
-    }
-    
-    // 如果是卖单，解冻持仓
-    if (order.type === 'SELL' && order.stock_code) {
-      const position = dbUtils.queryOne<PositionRow>(
-        'SELECT * FROM positions WHERE player_id = ? AND stock_code = ?',
-        [playerId, order.stock_code]
-      );
-      if (position) {
-        dbUtils.run(
-          'UPDATE positions SET available_quantity = available_quantity + ? WHERE id = ?',
-          [order.quantity, position.id]
-        );
-      }
-    }
-
-    const updatedPlayer = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [playerId]
-    );
-
-    return {
-      order: { ...order, status: 'CANCELLED' },
-      player: updatedPlayer!,
-    };
-  }
-
-  // 获取订单列表
-  getOrders(playerId: string): OrderRow[] {
-    return dbUtils.query<OrderRow>(
-      'SELECT * FROM orders WHERE player_id = ? ORDER BY created_at DESC',
-      [playerId]
-    );
-  }
-
-  // 获取持仓列表
-  getPositions(playerId: string): PositionRow[] {
-    return dbUtils.query<PositionRow>(
-      'SELECT * FROM positions WHERE player_id = ?',
-      [playerId]
-    );
-  }
-
-  // 获取交易记录
-  getTransactions(playerId: string, limit: number = 50): any[] {
-    return dbUtils.query(
-      'SELECT * FROM transactions WHERE player_id = ? ORDER BY created_at DESC LIMIT ?',
-      [playerId, limit]
-    );
-  }
-
-
-  // 每日重置 T+1 股票的 available_quantity
-  resetT1AvailableQuantities(): void {
-    // 获取所有 T+1 持仓
-    const t1Positions = dbUtils.query<PositionRow>(
-      `SELECT p.*, s.market FROM positions p 
-       JOIN stocks s ON p.stock_code = s.code 
-       WHERE s.market LIKE '%_T1'`
-    );
-    
-    const now = Date.now();
-    
-    for (const position of t1Positions) {
-      // T+1 股票：将 available_quantity 设置为 quantity（次日可卖）
-      dbUtils.run(
-        'UPDATE positions SET available_quantity = ? WHERE id = ?',
-        [position.quantity, position.id]
-      );
-    }
-    
-    console.log(`✅ 已重置 ${t1Positions.length} 个 T+1 持仓的可用数量`);
+    return transaction;
   }
 }
-
-export const tradeService = new TradeService();

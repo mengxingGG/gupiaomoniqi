@@ -1,185 +1,221 @@
-import bcrypt from 'bcrypt';
-import { v4 as uuidv4 } from 'uuid';
-import { dbUtils } from '../db/index.js';
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  scrypt,
+  timingSafeEqual,
+} from "node:crypto";
+import { promisify } from "node:util";
+import type {
+  AuthResult,
+  DisplayCurrency,
+  PublicAccount,
+} from "@gupiaomoniqi/shared";
+import { GAME_RULES } from "../config.js";
+import type {
+  AccountRecord,
+  GameRepository,
+} from "../repositories/GameRepository.js";
 
-export interface UserPayload {
-  userId: string;
-  username: string;
-  displayName: string;
-}
+const scryptAsync = promisify(scrypt);
 
-export interface PlayerData {
-  id: string;
-  cash: number;
-  initialCash: number;
-  totalAssets: number;
-  tradingDay: number;
-  isPaused: number;
-  updatedAt: number;
-}
-
-export interface RegisterInput {
-  username: string;
-  password: string;
-  displayName: string;
-}
-
-export interface LoginInput {
-  username: string;
-  password: string;
-}
-
-interface AccountRow {
-  id: string;
-  username: string;
-  password_hash: string;
-  display_name: string;
-  created_at: number;
-  last_login_at: number | null;
-}
-
-interface PlayerRow {
-  id: string;
-  cash: number;
-  initial_cash: number;
-  total_assets: number;
-  trading_day: number;
-  is_paused: number;
-  updated_at: number;
-}
-
-function mapPlayer(row: PlayerRow): PlayerData {
-  return {
-    id: row.id,
-    cash: row.cash,
-    initialCash: row.initial_cash,
-    totalAssets: row.total_assets,
-    tradingDay: row.trading_day,
-    isPaused: row.is_paused,
-    updatedAt: row.updated_at,
-  };
+export class AuthError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly statusCode = 400,
+  ) {
+    super(message);
+    this.name = "AuthError";
+  }
 }
 
 export class AuthService {
-  // 注册新用户
-  async register(input: RegisterInput): Promise<{ token: string; user: UserPayload; player: PlayerData }> {
-    const { username, password, displayName } = input;
+  constructor(
+    private readonly repository: GameRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
 
-    // 检查用户名是否已存在
-    const existing = dbUtils.queryOne<AccountRow>(
-      'SELECT id FROM accounts WHERE username = ?',
-      [username]
-    );
-    if (existing) {
-      throw new Error('USERNAME_EXISTS');
+  async register(input: {
+    username: string;
+    password: string;
+    displayName: string;
+  }): Promise<AuthResult> {
+    const username = input.username.trim();
+    const usernameNormalized = normalizeUsername(username);
+
+    if (this.repository.getAccountByUsername(usernameNormalized)) {
+      throw new AuthError("ACCOUNT_EXISTS", "这个用户名已经被注册", 409);
     }
 
-    // 密码哈希
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    // 创建账户
-    const userId = uuidv4();
-    const now = Date.now();
-
-    dbUtils.run(
-      'INSERT INTO accounts (id, username, password_hash, display_name, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, username, passwordHash, displayName, now, now]
-    );
-
-    // 创建玩家档案
-    dbUtils.run(
-      'INSERT INTO players (id, cash, initial_cash, total_assets, trading_day, is_paused, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [userId, 1000000, 1000000, 1000000, 1, 0, now]
-    );
-
-    // 获取玩家数据
-    const player = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [userId]
-    );
-
-    return {
-      token: '', // Token 由调用处生成
-      user: { userId, username, displayName },
-      player: mapPlayer(player!),
+    const now = this.clock();
+    const account: AccountRecord = {
+      id: randomUUID(),
+      username,
+      usernameNormalized,
+      passwordHash: await hashPassword(input.password),
+      displayName: input.displayName.trim(),
+      displayCurrency: "USD",
+      createdAt: now.toISOString(),
+      lastLoginAt: now.toISOString(),
     };
+
+    try {
+      await this.repository.createAccount({
+        account,
+        portfolio: {
+          id: randomUUID(),
+          accountId: account.id,
+          mode: "VIRTUAL",
+          initialCashUsd: GAME_RULES.initialCashUsd,
+          availableCashUsd: GAME_RULES.initialCashUsd,
+          frozenCashUsd: 0,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "ACCOUNT_EXISTS"
+      ) {
+        throw new AuthError(
+          "ACCOUNT_EXISTS",
+          "这个用户名已经被注册",
+          409,
+        );
+      }
+      throw error;
+    }
+
+    return this.#issueSession(account);
   }
 
-  // 用户登录
-  async login(input: LoginInput): Promise<{ token: string; user: UserPayload; player: PlayerData }> {
-    const { username, password } = input;
-
-    // 查找用户
-    const account = dbUtils.queryOne<AccountRow>(
-      'SELECT * FROM accounts WHERE username = ?',
-      [username]
+  async login(input: {
+    username: string;
+    password: string;
+  }): Promise<AuthResult> {
+    const account = this.repository.getAccountByUsername(
+      normalizeUsername(input.username),
     );
+
+    if (
+      !account ||
+      !(await verifyPassword(input.password, account.passwordHash))
+    ) {
+      throw new AuthError(
+        "INVALID_CREDENTIALS",
+        "用户名或密码错误",
+        401,
+      );
+    }
+
+    const now = this.clock().toISOString();
+    await this.repository.updateLastLogin(account.id, now);
+    account.lastLoginAt = now;
+    return this.#issueSession(account);
+  }
+
+  authenticate(authorization: string | undefined): AccountRecord | undefined {
+    const token = bearerToken(authorization);
+
+    if (!token) {
+      return undefined;
+    }
+
+    const session = this.repository.getSession(hashToken(token));
+    return session
+      ? this.repository.getAccountById(session.accountId)
+      : undefined;
+  }
+
+  async logout(authorization: string | undefined): Promise<void> {
+    const token = bearerToken(authorization);
+
+    if (token) {
+      await this.repository.deleteSession(hashToken(token));
+    }
+  }
+
+  async setDisplayCurrency(
+    accountId: string,
+    currency: DisplayCurrency,
+  ): Promise<PublicAccount> {
+    await this.repository.updateDisplayCurrency(accountId, currency);
+    const account = this.repository.getAccountById(accountId);
+
     if (!account) {
-      throw new Error('INVALID_CREDENTIALS');
+      throw new AuthError("ACCOUNT_NOT_FOUND", "账户不存在", 404);
     }
 
-    // 验证密码
-    const valid = await bcrypt.compare(password, account.password_hash);
-    if (!valid) {
-      throw new Error('INVALID_CREDENTIALS');
-    }
-
-    // 更新最后登录时间
-    dbUtils.run(
-      'UPDATE accounts SET last_login_at = ? WHERE id = ?',
-      [Date.now(), account.id]
-    );
-
-    // 获取玩家数据
-    const player = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [account.id]
-    );
-
-    return {
-      token: '',
-      user: {
-        userId: account.id,
-        username: account.username,
-        displayName: account.display_name,
-      },
-      player: mapPlayer(player!),
-    };
+    return toPublicAccount(account);
   }
 
-  // 获取当前用户信息
-  getMe(userId: string): { user: UserPayload; player: PlayerData } | null {
-    const account = dbUtils.queryOne<AccountRow>(
-      'SELECT * FROM accounts WHERE id = ?',
-      [userId]
-    );
-    if (!account) return null;
+  async #issueSession(account: AccountRecord): Promise<AuthResult> {
+    const token = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(
+      this.clock().getTime() + GAME_RULES.sessionTtlMs,
+    ).toISOString();
 
-    const player = dbUtils.queryOne<PlayerRow>(
-      'SELECT * FROM players WHERE id = ?',
-      [userId]
-    );
-
-    return {
-      user: {
-        userId: account.id,
-        username: account.username,
-        displayName: account.display_name,
-      },
-      player: mapPlayer(player!),
-    };
-  }
-
-  // 删除账号
-  deleteAccount(userId: string): void {
-    dbUtils.transaction(() => {
-      dbUtils.run('DELETE FROM positions WHERE player_id = ?', [userId]);
-      dbUtils.run('DELETE FROM orders WHERE player_id = ?', [userId]);
-      dbUtils.run('DELETE FROM transactions WHERE player_id = ?', [userId]);
-      dbUtils.run('DELETE FROM players WHERE id = ?', [userId]);
-      dbUtils.run('DELETE FROM accounts WHERE id = ?', [userId]);
+    await this.repository.createSession({
+      tokenHash: hashToken(token),
+      accountId: account.id,
+      expiresAt,
     });
+
+    return {
+      token,
+      account: toPublicAccount(account),
+    };
   }
 }
 
-export const authService = new AuthService();
+export function toPublicAccount(account: AccountRecord): PublicAccount {
+  return {
+    id: account.id,
+    username: account.username,
+    displayName: account.displayName,
+    displayCurrency: account.displayCurrency,
+    createdAt: account.createdAt,
+  };
+}
+
+function normalizeUsername(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function bearerToken(authorization: string | undefined): string | undefined {
+  const match = authorization?.match(/^Bearer\s+([A-Za-z0-9_-]+)$/i);
+  return match?.[1];
+}
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const derivedKey = (await scryptAsync(password, salt, 64)) as Buffer;
+  return `scrypt$${salt.toString("base64url")}$${derivedKey.toString("base64url")}`;
+}
+
+async function verifyPassword(
+  password: string,
+  encoded: string,
+): Promise<boolean> {
+  const [algorithm, saltText, hashText] = encoded.split("$");
+
+  if (algorithm !== "scrypt" || !saltText || !hashText) {
+    return false;
+  }
+
+  const expected = Buffer.from(hashText, "base64url");
+  const actual = (await scryptAsync(
+    password,
+    Buffer.from(saltText, "base64url"),
+    expected.length,
+  )) as Buffer;
+
+  return (
+    expected.length === actual.length &&
+    timingSafeEqual(expected, actual)
+  );
+}
