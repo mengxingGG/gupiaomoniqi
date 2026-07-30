@@ -32,6 +32,9 @@ const STRATEGIES: AITraderStrategy[] = [
   "AGGRESSIVE",
 ];
 const MARKETS: StockMarket[] = ["CN", "HK", "US", "UK"];
+const STARTUP_RECOVERY_DELAY_MS = 1_000;
+const STARTUP_RECOVERY_WINDOW_MS = 60_000;
+const TRADERS_PER_EVENT_LOOP_YIELD = 8;
 const PSYCHOLOGIES = [
   "纪律型",
   "耐心型",
@@ -62,6 +65,7 @@ export class AITradingService {
   readonly #recentTradeTimes: number[] = [];
   readonly #volatileTraders = new Map<string, AITraderRecord>();
   #tradersLoaded = false;
+  #startupScheduleRecovered = false;
 
   constructor(
     private readonly repository: GameRepository,
@@ -76,7 +80,9 @@ export class AITradingService {
       return this.#listAITraders().length;
     }
 
-    const existing = this.#listAITraders();
+    const existing = this.#spreadStaleStartupSchedule(
+      this.#listAITraders(),
+    );
     const missing = Math.max(0, targetCount - existing.length);
 
     if (missing === 0) {
@@ -178,6 +184,9 @@ export class AITradingService {
               quantity: decision.quantity,
               orderMode: "MARKET",
             },
+            {
+              settleDuePositions: false,
+            },
           );
           transactions.push(transaction);
         } catch (error) {
@@ -190,8 +199,16 @@ export class AITradingService {
       nextStates.push(
         this.#nextTraderState(trader, transaction, now),
       );
+
+      if (
+        nextStates.length % TRADERS_PER_EVENT_LOOP_YIELD ===
+        0
+      ) {
+        await yieldToEventLoop();
+      }
     }
 
+    await this.repository.updateAITraders(nextStates);
     this.#upsertTraderStates(nextStates);
     return this.#finishRound(
       due.length,
@@ -772,11 +789,79 @@ export class AITradingService {
     }));
   }
 
+  #spreadStaleStartupSchedule(
+    traders: AITraderRecord[],
+  ): AITraderRecord[] {
+    if (this.#startupScheduleRecovered) {
+      return traders;
+    }
+    this.#startupScheduleRecovered = true;
+
+    const now = this.clock().getTime();
+    const stale = traders
+      .filter((trader) => {
+        if (!trader.isActive) {
+          return false;
+        }
+        const nextActionAt = new Date(trader.nextActionAt).getTime();
+        return (
+          !Number.isFinite(nextActionAt) || nextActionAt <= now
+        );
+      })
+      .sort((left, right) => {
+        const leftAt = new Date(left.nextActionAt).getTime();
+        const rightAt = new Date(right.nextActionAt).getTime();
+        const normalizedLeft = Number.isFinite(leftAt)
+          ? leftAt
+          : Number.NEGATIVE_INFINITY;
+        const normalizedRight = Number.isFinite(rightAt)
+          ? rightAt
+          : Number.NEGATIVE_INFINITY;
+        return (
+          normalizedLeft - normalizedRight ||
+          left.id.localeCompare(right.id)
+        );
+      });
+
+    if (stale.length === 0) {
+      return traders;
+    }
+
+    const recoveredAtById = new Map(
+      stale.map((trader, index) => [
+        trader.id,
+        now +
+          STARTUP_RECOVERY_DELAY_MS +
+          Math.floor(
+            (index * STARTUP_RECOVERY_WINDOW_MS) / stale.length,
+          ),
+      ]),
+    );
+    const recovered = traders.map((trader) => {
+      const recoveredAt = recoveredAtById.get(trader.id);
+      return recoveredAt === undefined
+        ? trader
+        : {
+            ...trader,
+            nextActionAt: new Date(recoveredAt).toISOString(),
+          };
+    });
+
+    this.#upsertTraderStates(recovered);
+    return recovered;
+  }
+
   #upsertTraderStates(traders: AITraderRecord[]): void {
     for (const trader of traders) {
       this.#volatileTraders.set(trader.id, { ...trader });
     }
   }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 function allocationRange(

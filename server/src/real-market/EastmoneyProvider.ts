@@ -213,7 +213,7 @@ export class EastmoneyProvider {
       );
     }
 
-    const items = rows
+    const normalizedItems = rows
       .map((row, index) =>
         normalizeListRow(
           row,
@@ -229,6 +229,7 @@ export class EastmoneyProvider {
           item,
         ): item is ProviderInstrumentSnapshot => item !== null,
       );
+    const items = uniqueProviderItems(normalizedItems);
 
     return {
       market,
@@ -665,6 +666,22 @@ function normalizeListRow(
     rawLowPrice: low > 0 ? low : Math.min(current, open || current),
   };
   return { instrument, quote };
+}
+
+function uniqueProviderItems(
+  items: ProviderInstrumentSnapshot[],
+): ProviderInstrumentSnapshot[] {
+  const unique = new Map<string, ProviderInstrumentSnapshot>();
+  for (const item of items) {
+    const current = unique.get(item.instrument.providerSecId);
+    if (
+      !current ||
+      item.instrument.sourceRank < current.instrument.sourceRank
+    ) {
+      unique.set(item.instrument.providerSecId, item);
+    }
+  }
+  return [...unique.values()];
 }
 
 function normalizeKlineRow(

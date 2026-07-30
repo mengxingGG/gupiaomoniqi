@@ -61,6 +61,61 @@ describe("真实行情完整模块", () => {
     expect(requestedUrl?.searchParams.has("timil")).toBe(false);
   });
 
+  it("东方财富单页按 providerSecId 保留最低排名的首条快照", async () => {
+    const fetchImplementation = vi.fn(async () =>
+      Response.json({
+        rc: 0,
+        data: {
+          total: 2,
+          diff: [
+            {
+              f2: 100,
+              f3: 2.04,
+              f4: 2,
+              f5: 10_000,
+              f6: 1_000_000,
+              f12: "600519",
+              f13: 1,
+              f14: "贵州茅台",
+              f15: 101,
+              f16: 97,
+              f17: 99,
+              f18: 98,
+              f100: "白酒",
+              f124: 1_785_235_200,
+            },
+            {
+              f2: 999,
+              f3: 919.39,
+              f4: 901,
+              f5: 20_000,
+              f6: 2_000_000,
+              f12: "600519",
+              f13: 1,
+              f14: "重复条目",
+              f15: 999,
+              f16: 97,
+              f17: 99,
+              f18: 98,
+              f100: "白酒",
+              f124: 1_785_235_200,
+            },
+          ],
+        },
+      }),
+    ) as unknown as typeof fetch;
+    const page = await providerWith(fetchImplementation).fetchPage(
+      "CN",
+      1,
+    );
+
+    expect(page.providerTotal).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.instrument.providerSecId).toBe("1.600519");
+    expect(page.items[0]?.instrument.sourceRank).toBe(0);
+    expect(page.items[0]?.quote?.currentPrice).toBe(100);
+  });
+
   it("按接口 total 分页并正确归一化英国 GBX 行情", async () => {
     const fetchImplementation = vi.fn(async (input: string | URL) => {
       const url = new URL(String(input));
@@ -403,6 +458,188 @@ describe("真实行情完整模块", () => {
     expect(reloaded.getInstrumentById("real-us-105-aapl")?.type).toBe(
       "STOCK_REAL",
     );
+  });
+
+  it("仓储写入前按股票 ID 去重并保留最低排名的完整快照", async () => {
+    const { client, repository } = await createRealRepository();
+    const now = "2026-07-28T12:00:00.000Z";
+    const page = providerPage(now);
+    const retained = page.items[0]!;
+    const duplicate: ProviderInstrumentSnapshot = {
+      instrument: {
+        ...retained.instrument,
+        name: "重复条目",
+        sourceRank: 99,
+      },
+      quote: retained.quote
+        ? {
+            ...retained.quote,
+            currentPrice: 999,
+            highPrice: 999,
+            changeAmount: 901,
+            changePercent: 919.387755,
+            rawCurrentPrice: 999,
+            rawHighPrice: 999,
+          }
+        : null,
+    };
+    page.items = [retained, duplicate];
+    page.providerTotal = 2;
+
+    await expect(
+      repository.upsertProviderPage(page, "duplicate-page-test"),
+    ).resolves.toBeUndefined();
+
+    const stored = await client.query<{
+      instrument_count: number;
+      quote_count: number;
+      candle_count: number;
+      source_rank: number;
+      current_price: number;
+      candle_close: number;
+      page_row_count: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM real_instruments
+           WHERE id = $1) AS instrument_count,
+         (SELECT count(*)::int FROM real_quotes
+           WHERE instrument_id = $1) AS quote_count,
+         (SELECT count(*)::int FROM real_candles
+           WHERE instrument_id = $1) AS candle_count,
+         (SELECT row_count FROM real_provider_pages
+           WHERE market = 'US' AND page = 1 AND page_size = 100)
+           AS page_row_count,
+         i.source_rank,
+         q.current_price,
+         c.close AS candle_close
+       FROM real_instruments i
+       JOIN real_quotes q ON q.instrument_id = i.id
+       JOIN real_candles c ON c.instrument_id = i.id
+       WHERE i.id = $1`,
+      [retained.instrument.id],
+    );
+
+    expect(stored.rows).toEqual([
+      expect.objectContaining({
+        instrument_count: 1,
+        quote_count: 1,
+        candle_count: 1,
+        source_rank: retained.instrument.sourceRank,
+        current_price: retained.quote?.currentPrice,
+        candle_close: retained.quote?.currentPrice,
+        page_row_count: 1,
+      }),
+    ]);
+    expect(
+      repository.getMarketItem(retained.instrument.id)?.quote.currentPrice,
+    ).toBe(retained.quote?.currentPrice);
+  });
+
+  it("相同股票 ID 映射不同 providerSecId 时拒绝整页写入", async () => {
+    const { client, repository } = await createRealRepository();
+    const page = providerPage("2026-07-28T12:00:00.000Z");
+    const retained = page.items[0]!;
+    const collision: ProviderInstrumentSnapshot = {
+      instrument: {
+        ...retained.instrument,
+        providerSecId: "106.AAPL",
+        exchangeCode: "106",
+        sourceRank: 1,
+      },
+      quote: retained.quote
+        ? { ...retained.quote }
+        : null,
+    };
+    page.items = [retained, collision];
+
+    await expect(
+      repository.upsertProviderPage(page, "identity-collision-test"),
+    ).rejects.toThrow(
+      /real-us-105-aapl.*105\.AAPL.*106\.AAPL/i,
+    );
+
+    const stored = await client.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM real_instruments",
+    );
+    expect(stored.rows[0]?.count).toBe(0);
+  });
+
+  it("跨页股票 ID 碰撞时保留已存身份且不修改任何行情", async () => {
+    const { client, repository } = await createRealRepository();
+    const firstPage = providerPage("2026-07-28T12:00:00.000Z");
+    await repository.upsertProviderPage(firstPage, "first-page");
+
+    const collisionPage = providerPage(
+      "2026-07-28T12:01:00.000Z",
+    );
+    const incoming = collisionPage.items[0]!;
+    collisionPage.page = 2;
+    collisionPage.items = [
+      {
+        instrument: {
+          ...incoming.instrument,
+          providerSecId: "106.AAPL",
+          exchangeCode: "106",
+          sourcePage: 2,
+        },
+        quote: incoming.quote
+          ? {
+              ...incoming.quote,
+              currentPrice: 999,
+              highPrice: 999,
+              changeAmount: 901,
+              changePercent: 919.387755,
+              rawCurrentPrice: 999,
+              rawHighPrice: 999,
+            }
+          : null,
+      },
+    ];
+
+    await expect(
+      repository.upsertProviderPage(
+        collisionPage,
+        "second-page-collision",
+      ),
+    ).rejects.toThrow(
+      /real-us-105-aapl.*105\.AAPL.*106\.AAPL/i,
+    );
+
+    const stored = await client.query<{
+      provider_sec_id: string;
+      source_page: number;
+      current_price: number;
+      candle_close: number;
+      page_count: number;
+    }>(
+      `SELECT
+         i.provider_sec_id,
+         i.source_page,
+         q.current_price,
+         c.close AS candle_close,
+         (SELECT count(*)::int FROM real_provider_pages) AS page_count
+       FROM real_instruments i
+       JOIN real_quotes q ON q.instrument_id = i.id
+       JOIN real_candles c ON c.instrument_id = i.id
+       WHERE i.id = $1`,
+      [incoming.instrument.id],
+    );
+    expect(stored.rows).toEqual([
+      expect.objectContaining({
+        provider_sec_id: "105.AAPL",
+        source_page: 1,
+        current_price: 100,
+        candle_close: 100,
+        page_count: 1,
+      }),
+    ]);
+    expect(repository.getSourcePage(incoming.instrument.id)).toEqual({
+      market: "US",
+      page: 1,
+    });
+    expect(
+      repository.getQuote(incoming.instrument.id)?.currentPrice,
+    ).toBe(100);
   });
 
   it("同步器读取各市场 total 后遍历全部分页而不是固定 1200 只", async () => {

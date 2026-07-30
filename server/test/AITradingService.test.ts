@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AITradingService } from "../src/ai/AITradingService.js";
 import { createTestHarness } from "./helpers.js";
 
@@ -19,6 +19,10 @@ describe("AITradingService", () => {
     );
 
     expect(await service.ensurePopulation(14)).toBe(14);
+    const updateTradersSpy = vi.spyOn(
+      repository,
+      "updateAITraders",
+    );
     expect(service.getStatus().strategyCounts).toEqual({
       BALANCED: 2,
       MOMENTUM: 2,
@@ -41,11 +45,26 @@ describe("AITradingService", () => {
     expect(service.getStatus().lastRoundDurationMs).toBeGreaterThanOrEqual(
       0,
     );
+    expect(updateTradersSpy).toHaveBeenCalledTimes(1);
+    expect(updateTradersSpy.mock.calls[0]?.[0]).toHaveLength(14);
     expect(
       repository
         .listAITraders()
-        .every((trader) => trader.lastActionAt === null),
+        .every(
+          (trader) =>
+            trader.lastActionAt === now.toISOString() &&
+            new Date(trader.nextActionAt).getTime() >
+              now.getTime(),
+        ),
     ).toBe(true);
+    expect(
+      repository
+        .listAITraders()
+        .reduce(
+          (total, trader) => total + trader.totalTrades,
+          0,
+        ),
+    ).toBe(round.trades);
     expect(service.getStatus().dueBacklog).toBe(0);
 
     const traded = repository

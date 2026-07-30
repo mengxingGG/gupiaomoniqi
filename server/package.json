@@ -6,6 +6,7 @@
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "@fastify/cors": "^11.3.0",
+    "@fastify/static": "10.1.2",
     "@fastify/websocket": "^11.3.0",
     "@gupiaomoniqi/shared": "3.0.0-alpha.1",
     "drizzle-orm": "^0.45.2",

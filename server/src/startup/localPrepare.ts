@@ -54,7 +54,7 @@ async function inspectRealDatabase(): Promise<void> {
 
 async function rebuildVirtualDatabase(): Promise<void> {
   await importMarketSeeds(marketSeedPath, {
-    deleteSnapshotAfterImport: true,
+    deleteSnapshotAfterImport: false,
     expectedPerMarket: VIRTUAL_MARKET_SEED_COUNT_PER_MARKET,
   });
 }

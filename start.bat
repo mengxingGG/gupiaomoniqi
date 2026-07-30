@@ -3,7 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
-title Stock Simulator - Development
+title Four Seas Stock Simulator - Local Services
 
 set "NODE_EXE=%ProgramFiles%\nodejs\node.exe"
 set "NPM_CMD=%ProgramFiles%\nodejs\npm.cmd"
@@ -37,6 +37,13 @@ if not exist "logs" mkdir "logs"
 
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "LOG_STAMP=%%i"
 set "LOG_FILE=%CD%\logs\dev-app-%LOG_STAMP%.log"
+set "GUPIAOMONIQI_START_ROOT=%CD%"
+set "GUPIAOMONIQI_START_NPM=%NPM_CMD%"
+set "GUPIAOMONIQI_START_LOG=%LOG_FILE%"
+
+echo.
+echo [INFO] This launcher manages local data preparation, backend, and frontend.
+echo [INFO] It never starts, stops, or restarts the independent Cloudflare tunnel.
 
 echo.
 echo [SETUP] Cleaning previous local server processes...
@@ -56,7 +63,9 @@ if errorlevel 1 (
 
 echo.
 echo ========================================
-echo   Stock Simulator is starting
+echo   Local services are starting
+echo   Includes: data + backend + frontend
+echo   Excludes: Cloudflare tunnel / domain
 echo   Web:    http://localhost:5173
 echo   Server: http://localhost:3100
 echo   Real market: Eastmoney full-universe sync to server\data\real-pgdata
@@ -65,7 +74,7 @@ echo   Press Ctrl+C to stop both services
 echo ========================================
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '%CD%'; & '%NPM_CMD%' run dev:app 2>&1 | Tee-Object -FilePath '%LOG_FILE%'; exit $LASTEXITCODE"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath $env:GUPIAOMONIQI_START_ROOT; & $env:GUPIAOMONIQI_START_NPM run dev:app 2>&1 | Tee-Object -FilePath $env:GUPIAOMONIQI_START_LOG; exit $LASTEXITCODE"
 set "APP_EXIT_CODE=%errorlevel%"
 
 if not "%APP_EXIT_CODE%"=="0" (

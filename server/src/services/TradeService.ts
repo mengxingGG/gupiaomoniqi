@@ -81,6 +81,9 @@ export class TradeService {
     traderId: string,
     portfolioId: string,
     request: TradeRequest,
+    options: {
+      settleDuePositions?: boolean;
+    } = {},
   ): Promise<Transaction> {
     return this.#enqueue(() =>
       this.#executePortfolio(
@@ -88,6 +91,7 @@ export class TradeService {
         request,
         "AI",
         traderId,
+        options.settleDuePositions ?? true,
       ),
     );
   }
@@ -112,9 +116,12 @@ export class TradeService {
     request: TradeRequest,
     actorType: TradeActorType,
     actorId: string,
+    settleDuePositions = true,
   ): Promise<Transaction> {
     const now = this.clock();
-    await this.repository.settleDuePositions(now.toISOString());
+    if (settleDuePositions) {
+      await this.repository.settleDuePositions(now.toISOString());
+    }
     const portfolio = this.repository.getPortfolioById(portfolioId);
 
     if (!portfolio) {

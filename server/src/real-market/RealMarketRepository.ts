@@ -51,6 +51,19 @@ interface InstrumentQuoteRow {
   received_at: Date | string | null;
 }
 
+const PROVIDER_PAGE_WRITE_BATCH_SIZE = 25;
+const CANDLE_WRITE_BATCH_SIZE = 100;
+
+const MARKET_DAY_FORMATTERS: Record<
+  StockMarket,
+  Intl.DateTimeFormat
+> = {
+  CN: createMarketDayFormatter("Asia/Shanghai"),
+  HK: createMarketDayFormatter("Asia/Hong_Kong"),
+  US: createMarketDayFormatter("America/New_York"),
+  UK: createMarketDayFormatter("Europe/London"),
+};
+
 export interface RealMarketListingFilter {
   market?: StockMarket;
   search?: string;
@@ -321,7 +334,21 @@ export class RealMarketRepository {
     sweepId: string | null,
     hotInstrumentIds: ReadonlySet<string> = new Set(),
   ): Promise<void> {
-    const instruments = providerPage.items.map(({ instrument }) => ({
+    const items = uniqueProviderPageItems(providerPage.items);
+    for (const item of items) {
+      const existing = this.#instruments.get(item.instrument.id);
+      if (
+        existing &&
+        existing.providerSecId !== item.instrument.providerSecId
+      ) {
+        throw instrumentIdentityCollision(
+          item.instrument.id,
+          existing.providerSecId,
+          item.instrument.providerSecId,
+        );
+      }
+    }
+    const instruments = items.map(({ instrument }) => ({
       id: instrument.id,
       provider_sec_id: instrument.providerSecId,
       symbol: instrument.symbol,
@@ -340,7 +367,7 @@ export class RealMarketRepository {
       source_updated_at: instrument.sourceUpdatedAt,
       updated_at: providerPage.receivedAt,
     }));
-    const quotes = providerPage.items
+    const quotes = items
       .map(({ quote }) => quote)
       .filter((quote): quote is RealQuoteRecord => quote !== null)
       .map((quote) => ({
@@ -362,12 +389,12 @@ export class RealMarketRepository {
         source_updated_at: quote.updatedAt,
         received_at: quote.receivedAt,
       }));
-    const dailyCandles = providerPage.items
+    const dailyCandles = items
       .map(({ instrument, quote }) =>
         quote ? dailySnapshot(instrument, quote) : null,
       )
       .filter((candle): candle is ProviderCandle => candle !== null);
-    const minuteCandles = providerPage.items
+    const minuteCandles = items
       .map(({ quote }) =>
         quote && hotInstrumentIds.has(quote.instrumentId)
           ? hotMinuteSnapshot(
@@ -379,7 +406,10 @@ export class RealMarketRepository {
       .filter((candle): candle is ProviderCandle => candle !== null);
 
     await this.client.transaction(async (transaction) => {
-      if (instruments.length > 0) {
+      for (const batch of chunked(
+        instruments,
+        PROVIDER_PAGE_WRITE_BATCH_SIZE,
+      )) {
         await transaction.query(
           `INSERT INTO real_instruments (
              id, provider_sec_id, symbol, name, market,
@@ -423,11 +453,15 @@ export class RealMarketRepository {
              ),
              source_updated_at = excluded.source_updated_at,
              updated_at = excluded.updated_at`,
-          [JSON.stringify(instruments)],
+          [JSON.stringify(batch)],
         );
+        await yieldToEventLoop();
       }
 
-      if (quotes.length > 0) {
+      for (const batch of chunked(
+        quotes,
+        PROVIDER_PAGE_WRITE_BATCH_SIZE,
+      )) {
         await transaction.query(
           `INSERT INTO real_quotes (
              instrument_id, current_price, previous_close, open_price,
@@ -471,12 +505,23 @@ export class RealMarketRepository {
              received_at = excluded.received_at
            WHERE excluded.source_updated_at >=
                  real_quotes.source_updated_at`,
-          [JSON.stringify(quotes)],
+          [JSON.stringify(batch)],
         );
+        await yieldToEventLoop();
       }
 
-      await upsertCandleRows(transaction, dailyCandles, false);
-      await upsertCandleRows(transaction, minuteCandles, true);
+      await upsertCandleRows(
+        transaction,
+        dailyCandles,
+        false,
+        PROVIDER_PAGE_WRITE_BATCH_SIZE,
+      );
+      await upsertCandleRows(
+        transaction,
+        minuteCandles,
+        true,
+        PROVIDER_PAGE_WRITE_BATCH_SIZE,
+      );
 
       await transaction.query(
         `INSERT INTO real_provider_pages (
@@ -503,7 +548,7 @@ export class RealMarketRepository {
           providerPage.page,
           providerPage.pageSize,
           providerPage.providerTotal,
-          providerPage.items.length,
+          items.length,
           sweepId,
           providerPage.receivedAt,
           providerPage.durationMs,
@@ -511,7 +556,7 @@ export class RealMarketRepository {
       );
     });
 
-    for (const { instrument, quote } of providerPage.items) {
+    for (const { instrument, quote } of items) {
       this.#instruments.set(
         instrument.id,
         structuredClone(instrument),
@@ -536,7 +581,7 @@ export class RealMarketRepository {
       page: providerPage.page,
       pageSize: providerPage.pageSize,
       providerTotal: providerPage.providerTotal,
-      rowCount: providerPage.items.length,
+      rowCount: items.length,
       lastSweepId: sweepId,
       lastAttemptAt: providerPage.receivedAt,
       lastSuccessAt: providerPage.receivedAt,
@@ -559,9 +604,12 @@ export class RealMarketRepository {
       return;
     }
     await this.client.transaction(async (transaction) => {
-      for (const chunk of chunked(candles, 2_000)) {
-        await upsertCandleRows(transaction, chunk, false);
-      }
+      await upsertCandleRows(
+        transaction,
+        candles,
+        false,
+        CANDLE_WRITE_BATCH_SIZE,
+      );
     });
   }
 
@@ -892,25 +940,24 @@ function marketDayBucket(
   timestamp: string,
   market: StockMarket,
 ): string {
-  const timeZone: Record<StockMarket, string> = {
-    CN: "Asia/Shanghai",
-    HK: "Asia/Hong_Kong",
-    US: "America/New_York",
-    UK: "Europe/London",
-  };
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: timeZone[market],
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
   const parts = Object.fromEntries(
-    formatter
+    MARKET_DAY_FORMATTERS[market]
       .formatToParts(new Date(timestamp))
       .filter((part) => part.type !== "literal")
       .map((part) => [part.type, part.value]),
   );
   return `${parts.year}-${parts.month}-${parts.day}T00:00:00.000Z`;
+}
+
+function createMarketDayFormatter(
+  timeZone: string,
+): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
 }
 
 async function upsertCandleRows(
@@ -922,53 +969,54 @@ async function upsertCandleRows(
   },
   candles: ProviderCandle[],
   mergeVolume: boolean,
+  batchSize: number,
 ): Promise<void> {
-  if (candles.length === 0) {
-    return;
-  }
-  const rows = candles.map((candle) => ({
-    instrument_id: candle.instrumentId,
-    interval: candle.interval,
-    bucket_start: candle.time,
-    open: candle.open,
-    high: candle.high,
-    low: candle.low,
-    close: candle.close,
-    volume: candle.volume,
-    average_price: candle.averagePrice ?? null,
-    source: candle.source,
-    is_partial: candle.isPartial,
-    updated_at: candle.updatedAt,
-  }));
-  await transaction.query(
-    `INSERT INTO real_candles (
-       instrument_id, interval, bucket_start, open, high, low, close,
-       volume, average_price, source, is_partial, updated_at
-     )
-     SELECT x.instrument_id, x.interval, x.bucket_start, x.open,
-            x.high, x.low, x.close, x.volume, x.average_price,
-            x.source, x.is_partial, x.updated_at
-       FROM jsonb_to_recordset($1::jsonb) AS x(
-         instrument_id text, interval text, bucket_start timestamptz,
-         open float8, high float8, low float8, close float8,
-         volume float8, average_price float8, source text, is_partial boolean,
-         updated_at timestamptz
+  for (const batch of chunked(candles, batchSize)) {
+    const rows = batch.map((candle) => ({
+      instrument_id: candle.instrumentId,
+      interval: candle.interval,
+      bucket_start: candle.time,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+      average_price: candle.averagePrice ?? null,
+      source: candle.source,
+      is_partial: candle.isPartial,
+      updated_at: candle.updatedAt,
+    }));
+    await transaction.query(
+      `INSERT INTO real_candles (
+         instrument_id, interval, bucket_start, open, high, low, close,
+         volume, average_price, source, is_partial, updated_at
        )
-     ON CONFLICT (instrument_id, interval, bucket_start)
-     DO UPDATE SET
-       open = real_candles.open,
-       high = GREATEST(real_candles.high, excluded.high),
-       low = LEAST(real_candles.low, excluded.low),
-       close = excluded.close,
-       volume = ${mergeVolume
-         ? "real_candles.volume + excluded.volume"
-         : "excluded.volume"},
-       average_price = excluded.average_price,
-       source = excluded.source,
-       is_partial = excluded.is_partial,
-       updated_at = excluded.updated_at`,
-    [JSON.stringify(rows)],
-  );
+       SELECT x.instrument_id, x.interval, x.bucket_start, x.open,
+              x.high, x.low, x.close, x.volume, x.average_price,
+              x.source, x.is_partial, x.updated_at
+         FROM jsonb_to_recordset($1::jsonb) AS x(
+           instrument_id text, interval text, bucket_start timestamptz,
+           open float8, high float8, low float8, close float8,
+           volume float8, average_price float8, source text,
+           is_partial boolean, updated_at timestamptz
+         )
+       ON CONFLICT (instrument_id, interval, bucket_start)
+       DO UPDATE SET
+         open = real_candles.open,
+         high = GREATEST(real_candles.high, excluded.high),
+         low = LEAST(real_candles.low, excluded.low),
+         close = excluded.close,
+         volume = ${mergeVolume
+          ? "real_candles.volume + excluded.volume"
+          : "excluded.volume"},
+         average_price = excluded.average_price,
+         source = excluded.source,
+         is_partial = excluded.is_partial,
+         updated_at = excluded.updated_at`,
+      [JSON.stringify(rows)],
+    );
+    await yieldToEventLoop();
+  }
 }
 
 function pageKey(
@@ -989,4 +1037,46 @@ function chunked<T>(values: T[], size: number): T[][] {
     result.push(values.slice(index, index + size));
   }
   return result;
+}
+
+function uniqueProviderPageItems(
+  items: ProviderInstrumentSnapshot[],
+): ProviderInstrumentSnapshot[] {
+  const unique = new Map<string, ProviderInstrumentSnapshot>();
+  for (const item of items) {
+    const current = unique.get(item.instrument.id);
+    if (
+      current &&
+      current.instrument.providerSecId !==
+        item.instrument.providerSecId
+    ) {
+      throw instrumentIdentityCollision(
+        item.instrument.id,
+        current.instrument.providerSecId,
+        item.instrument.providerSecId,
+      );
+    }
+    if (
+      !current ||
+      item.instrument.sourceRank < current.instrument.sourceRank
+    ) {
+      unique.set(item.instrument.id, item);
+    }
+  }
+  return [...unique.values()];
+}
+
+function instrumentIdentityCollision(
+  instrumentId: string,
+  currentProviderSecId: string,
+  incomingProviderSecId: string,
+): Error {
+  return new Error(
+    `Real market instrument identity collision: ${instrumentId} ` +
+      `maps to both ${currentProviderSecId} and ${incomingProviderSecId}`,
+  );
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }

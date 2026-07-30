@@ -23,7 +23,7 @@ export class AITradingRuntime {
     }
 
     this.#running = true;
-    this.#schedule(0);
+    this.#schedule(this.#currentSettings().intervalMs);
   }
 
   stop(): void {
@@ -32,7 +32,7 @@ export class AITradingRuntime {
       return;
     }
 
-    clearInterval(this.#timer);
+    clearTimeout(this.#timer);
     this.#timer = null;
   }
 
@@ -71,14 +71,30 @@ export class AITradingRuntime {
   #currentSettings(): AIRuntimeSettings {
     const dynamic = this.settingsSource?.();
     return {
-      activePerRound: Math.max(
+      activePerRound: normalizedInteger(
+        dynamic?.activePerRound,
+        this.activePerRound,
         1,
-        Math.round(dynamic?.activePerRound ?? this.activePerRound),
       ),
-      intervalMs: Math.max(
+      intervalMs: normalizedInteger(
+        dynamic?.intervalMs,
+        this.intervalMs,
         100,
-        Math.round(dynamic?.intervalMs ?? this.intervalMs),
       ),
     };
   }
+}
+
+function normalizedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+): number {
+  const candidate = Number.isFinite(value)
+    ? value!
+    : Number.isFinite(fallback)
+      ? fallback
+      : minimum;
+
+  return Math.max(minimum, Math.round(candidate));
 }

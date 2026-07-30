@@ -71,7 +71,7 @@ export async function ensureVirtualMarketUniverse(
 
   await importMarketSeeds(marketSeedPath, {
     databaseConnection: connection,
-    deleteSnapshotAfterImport: true,
+    deleteSnapshotAfterImport: false,
     expectedPerMarket: VIRTUAL_MARKET_SEED_COUNT_PER_MARKET,
   });
 

@@ -43,4 +43,48 @@ describe("AITradingRuntime", () => {
 
     expect(rounds).toEqual([96, 48]);
   });
+
+  it("启动后等待完整间隔再执行首轮，给 HTTP readiness 留出时间", async () => {
+    vi.useFakeTimers();
+    const service = {
+      runRound: vi.fn(async () => null),
+    };
+    const runtime = new AITradingRuntime(
+      service as never,
+      1_000,
+      32,
+    );
+
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(service.runRound).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(service.runRound).toHaveBeenCalledTimes(1);
+    runtime.stop();
+  });
+
+  it("无效动态参数不会退化成 0ms 调度", async () => {
+    vi.useFakeTimers();
+    const service = {
+      runRound: vi.fn(async () => null),
+    };
+    const runtime = new AITradingRuntime(
+      service as never,
+      750,
+      24,
+      () => ({
+        activePerRound: Number.NaN,
+        intervalMs: Number.NaN,
+      }),
+    );
+
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(749);
+    expect(service.runRound).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(service.runRound).toHaveBeenCalledWith(24);
+    runtime.stop();
+  });
 });

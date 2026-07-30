@@ -1,9 +1,34 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GAME_RULES } from "../src/config.js";
 import { TradeError } from "../src/services/TradeService.js";
 import { createTestHarness } from "./helpers.js";
 
 describe("TradeService", () => {
+  it("AI 批处理可复用轮首结算而不为每笔交易重复结算", async () => {
+    const { accountId, repository, tradeService } =
+      await createTestHarness();
+    const portfolio = repository.getPortfolioByAccountId(accountId!);
+    const settleDuePositions = vi.spyOn(
+      repository,
+      "settleDuePositions",
+    );
+
+    await tradeService.executeAI(
+      "ai-test-trader",
+      portfolio!.id,
+      {
+        instrumentId: "us-aapl",
+        side: "BUY",
+        quantity: 1,
+      },
+      {
+        settleDuePositions: false,
+      },
+    );
+
+    expect(settleDuePositions).not.toHaveBeenCalled();
+  });
+
   it("按统一美元账本买入人民币报价股票", async () => {
     const { accountId, tradeService } = await createTestHarness();
     expect(accountId).toBeDefined();

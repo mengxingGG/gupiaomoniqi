@@ -1,4 +1,9 @@
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import type {
   AITraderRankingItem,
@@ -35,6 +40,8 @@ import Fastify, {
 import { z } from "zod";
 import { AITradingRuntime } from "./ai/AITradingRuntime.js";
 import { AITradingService } from "./ai/AITradingService.js";
+import { AppUpdateService } from "./app-update/AppUpdateService.js";
+import { registerAppUpdateRoutes } from "./app-update/registerAppUpdateRoutes.js";
 import {
   GAME_RULES,
   LOAD_CONTROLLER_CONFIG,
@@ -194,6 +201,8 @@ export interface CreateApplicationOptions {
   repository?: GameRepository;
   databaseConnection?: DatabaseConnection;
   logger?: boolean;
+  serveWeb?: boolean;
+  webRoot?: string;
   random?: () => number;
   clock?: () => Date;
   tickIntervalMs?: number;
@@ -205,11 +214,13 @@ export interface CreateApplicationOptions {
   realRepository?: RealMarketRepository;
   realSyncEnabled?: boolean;
   realFetchImplementation?: typeof fetch;
+  appUpdateDirectory?: string;
 }
 
 export async function createApplication(
   options: CreateApplicationOptions = {},
 ): Promise<ApplicationContext> {
+  const staticWeb = await resolveStaticWebConfiguration(options);
   const startupStartedAt = Date.now();
   const startupLog = (message: string): void => {
     if (!options.logger) {
@@ -350,7 +361,9 @@ export async function createApplication(
   );
   const aiEnabled =
     options.aiEnabled ??
-    (!options.repository && !options.databaseConnection);
+    (!options.repository &&
+      !options.databaseConnection &&
+      process.env.AI_TRADING_ENABLED !== "false");
   const aiTradingService = new AITradingService(
     repository,
     tradeService,
@@ -414,6 +427,11 @@ export async function createApplication(
   const app = Fastify({
     logger: options.logger ?? false,
   });
+  const appUpdateService = new AppUpdateService(
+    options.appUpdateDirectory ??
+      process.env.APP_UPDATE_DIR ??
+      join("server", "data", "app-updates"),
+  );
 
   await app.register(cors, {
     origin(origin, callback) {
@@ -429,18 +447,35 @@ export async function createApplication(
   });
   await app.register(websocket);
 
-  app.addHook("onSend", async (_request, reply, payload) => {
+  app.addHook("onSend", async (request, reply, payload) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("X-Frame-Options", "DENY");
     reply.header("Referrer-Policy", "no-referrer");
     reply.header(
       "Content-Security-Policy",
-      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      staticWeb &&
+        !hasUnsafeStaticPath(request.url) &&
+        !isServicePath(request.url)
+        ? [
+            "default-src 'self'",
+            "base-uri 'self'",
+            "frame-ancestors 'none'",
+            "form-action 'self'",
+            "object-src 'none'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data:",
+            "font-src 'self' data:",
+            "connect-src 'self' ws: wss:",
+          ].join("; ")
+        : "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     );
     reply.header("Cross-Origin-Resource-Policy", "same-origin");
     reply.header("Cross-Origin-Opener-Policy", "same-origin");
     return payload;
   });
+
+  registerAppUpdateRoutes(app, appUpdateService);
 
   app.get("/api/health", async () => ({
     data: {
@@ -1244,6 +1279,10 @@ export async function createApplication(
     socket.on("error", unsubscribe);
   });
 
+  if (staticWeb) {
+    await registerStaticWeb(app, staticWeb.root);
+  }
+
   app.addHook("onClose", async () => {
     loadController.stop();
     runtime.stop();
@@ -1431,6 +1470,189 @@ function sendAccountFeatureError(
     });
   }
   throw error;
+}
+
+interface StaticWebConfiguration {
+  root: string;
+}
+
+const DEFAULT_WEB_ROOT = fileURLToPath(
+  new URL("../../web/dist/", import.meta.url),
+);
+
+async function resolveStaticWebConfiguration(
+  options: CreateApplicationOptions,
+): Promise<StaticWebConfiguration | null> {
+  const enabled =
+    options.serveWeb ??
+    process.env.SERVE_WEB?.trim().toLowerCase() === "true";
+
+  if (!enabled) {
+    return null;
+  }
+
+  const configuredRoot =
+    options.webRoot ?? process.env.WEB_DIST_DIR ?? DEFAULT_WEB_ROOT;
+  const root = isAbsolute(configuredRoot)
+    ? configuredRoot
+    : resolve(configuredRoot);
+  const indexPath = join(root, "index.html");
+
+  try {
+    await access(indexPath, fsConstants.R_OK);
+  } catch (error) {
+    throw new Error(
+      `SERVE_WEB=true, but the production web entry was not found at ${indexPath}. Run "npm run build" before starting the server.`,
+      { cause: error },
+    );
+  }
+
+  return { root };
+}
+
+async function registerStaticWeb(
+  app: FastifyInstance,
+  root: string,
+): Promise<void> {
+  await app.register(fastifyStatic, {
+    root,
+    cacheControl: false,
+    dotfiles: "deny",
+    serveDotFiles: false,
+    allowedPath(pathName, _root, request) {
+      const candidatePath = pathName.startsWith("/")
+        ? pathName
+        : `/${pathName}`;
+      return (
+        !hasUnsafeStaticPath(request.url) &&
+        !hasUnsafeStaticPath(candidatePath) &&
+        !isServicePath(request.url) &&
+        !isServicePath(candidatePath)
+      );
+    },
+    setHeaders(reply, filePath) {
+      const normalizedPath = filePath.replaceAll("\\", "/");
+
+      if (normalizedPath.endsWith("/index.html")) {
+        reply.header("Cache-Control", "no-store");
+        return;
+      }
+      if (normalizedPath.includes("/assets/")) {
+        reply.header(
+          "Cache-Control",
+          "public, max-age=31536000, immutable",
+        );
+        return;
+      }
+      reply.header("Cache-Control", "public, max-age=3600");
+    },
+  });
+
+  app.setNotFoundHandler((request, reply) => {
+    if (
+      hasUnsafeStaticPath(request.url) ||
+      isServicePath(request.url) ||
+      !isHtmlNavigationRequest(request)
+    ) {
+      return reply
+        .status(404)
+        .type("application/json; charset=utf-8")
+        .send({
+          statusCode: 404,
+          error: "Not Found",
+          message: `Route ${request.method}:${request.url.split("?")[0]} not found`,
+        });
+    }
+
+    return reply
+      .header("Cache-Control", "no-store")
+      .type("text/html; charset=utf-8")
+      .sendFile("index.html", {
+        cacheControl: false,
+        immutable: false,
+        maxAge: 0,
+      });
+  });
+}
+
+function isServicePath(requestUrl: string): boolean {
+  const { decodedPath } = inspectRequestPath(requestUrl);
+  if (!decodedPath) {
+    return false;
+  }
+  return (
+    decodedPath === "/api" ||
+    decodedPath.startsWith("/api/") ||
+    decodedPath === "/ws" ||
+    decodedPath.startsWith("/ws/")
+  );
+}
+
+function hasUnsafeStaticPath(requestUrl: string): boolean {
+  return inspectRequestPath(requestUrl).unsafe;
+}
+
+function inspectRequestPath(requestUrl: string): {
+  decodedPath: string | null;
+  unsafe: boolean;
+} {
+  const pathName = requestUrl.split(/[?#]/, 1)[0] ?? requestUrl;
+  let decodedPath = pathName;
+  let unsafe = false;
+
+  for (let pass = 0; pass < 8; pass += 1) {
+    if (
+      decodedPath.includes("\\") ||
+      /%(?:2f|5c)/i.test(decodedPath)
+    ) {
+      unsafe = true;
+    }
+
+    let nextPath: string;
+    try {
+      nextPath = decodeURIComponent(decodedPath);
+    } catch {
+      return { decodedPath: null, unsafe: true };
+    }
+
+    if (nextPath === decodedPath) {
+      break;
+    }
+    decodedPath = nextPath;
+  }
+
+  const normalizedSeparators = decodedPath.replaceAll("\\", "/");
+  if (/[\u0000-\u001f\u007f]/u.test(normalizedSeparators)) {
+    unsafe = true;
+  }
+  if (
+    normalizedSeparators
+      .split("/")
+      .some((segment) => segment === "." || segment === "..")
+  ) {
+    unsafe = true;
+  }
+
+  return {
+    decodedPath: normalizedSeparators,
+    unsafe,
+  };
+}
+
+function isHtmlNavigationRequest(request: FastifyRequest): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return false;
+  }
+
+  const accept = request.headers.accept?.toLowerCase() ?? "";
+  return accept
+    .split(",")
+    .map((mediaRange) => mediaRange.split(";", 1)[0]?.trim())
+    .some(
+      (mediaType) =>
+        mediaType === "text/html" ||
+        mediaType === "application/xhtml+xml",
+    );
 }
 
 class WindowRateLimiter {

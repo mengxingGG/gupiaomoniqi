@@ -181,15 +181,25 @@ describe("DatabaseGameRepository", () => {
       expect(reloaded.listTransactions(aiPortfolioId)).toHaveLength(0);
       const traderState = await client.query<{
         last_action_at: string | null;
+        next_action_at: string;
         total_trades: number;
       }>(
-        `SELECT last_action_at, total_trades
+        `SELECT last_action_at, next_action_at, total_trades
            FROM ai_traders
           WHERE id = $1`,
         [aiTraderId],
       );
-      expect(traderState.rows[0]?.last_action_at).toBeNull();
-      expect(traderState.rows[0]?.total_trades).toBe(0);
+      expect(traderState.rows[0]?.last_action_at).not.toBeNull();
+      expect(
+        new Date(
+          traderState.rows[0]?.next_action_at ?? 0,
+        ).getTime(),
+      ).toBeGreaterThan(now.getTime());
+      expect(traderState.rows[0]?.total_trades).toBe(round.trades);
+      expect(reloaded.getAITrader(aiTraderId)).toMatchObject({
+        lastActionAt: now.toISOString(),
+        totalTrades: round.trades,
+      });
       const aiPosition = reloaded.getPosition(
         aiPortfolioId,
         "cn-600519",

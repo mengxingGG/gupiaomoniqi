@@ -85,13 +85,13 @@ export const REAL_MARKET_CONFIG = {
   ),
   concurrency: boundedInteger(
     process.env.REAL_MARKET_CONCURRENCY,
-    12,
+    2,
     1,
     32,
   ),
   fullSweepTargetMs: boundedInteger(
     process.env.REAL_MARKET_FULL_SWEEP_MS,
-    10_000,
+    60_000,
     5_000,
     10 * 60_000,
   ),
@@ -103,7 +103,7 @@ export const REAL_MARKET_CONFIG = {
   ),
   hotPagesPerRound: boundedInteger(
     process.env.REAL_MARKET_HOT_PAGES_PER_ROUND,
-    8,
+    2,
     1,
     32,
   ),

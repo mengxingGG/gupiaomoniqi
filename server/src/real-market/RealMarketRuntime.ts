@@ -45,6 +45,7 @@ interface ViewPriority {
 const DETAIL_PRIORITY_SCORE = 20_000;
 const VISIBLE_PRIORITY_SCORE = 100;
 const HELD_PRIORITY_SCORE = 15_000;
+const MIN_FULL_SWEEP_COOLDOWN_MS = 1_000;
 
 export class RealMarketRuntime {
   readonly #listeners = new Set<QuoteListener>();
@@ -57,6 +58,7 @@ export class RealMarketRuntime {
     string,
     { snapshot: OrderBookSnapshot; expiresAt: number }
   >();
+  #writeQueue: Promise<void> = Promise.resolve();
   readonly #abortController = new AbortController();
   readonly #progress = new Map<StockMarket, MarketProgress>();
   #running = false;
@@ -127,7 +129,9 @@ export class RealMarketRuntime {
     }
     this.#running = true;
     this.#fullLoop = this.#runFullLoop();
-    this.#scheduleHotRefresh(0);
+    this.#scheduleHotRefresh(
+      this.#refreshEffectiveSettings().hotRefreshIntervalMs,
+    );
   }
 
   stop(): void {
@@ -142,6 +146,7 @@ export class RealMarketRuntime {
 
   async waitForStop(): Promise<void> {
     await this.#fullLoop?.catch(() => undefined);
+    await this.#writeQueue.catch(() => undefined);
   }
 
   subscribe(listener: QuoteListener): () => void {
@@ -326,9 +331,9 @@ export class RealMarketRuntime {
         this.#lastError = errorMessage(error);
       });
       const remaining = settings.fullSweepTargetMs - (Date.now() - started);
-      if (remaining > 0 && !this.#stopped) {
+      if (!this.#stopped) {
         await abortableDelay(
-          remaining,
+          Math.max(MIN_FULL_SWEEP_COOLDOWN_MS, remaining),
           this.#abortController.signal,
         ).catch(() => undefined);
       }
@@ -355,7 +360,7 @@ export class RealMarketRuntime {
       startedAt.toISOString(),
     );
 
-    const firstPages = await Promise.all(
+    await Promise.all(
       REAL_MARKETS.map(async (market) => {
         const result = await this.#fetchFullPage(
           { market, page: 1 },
@@ -398,6 +403,7 @@ export class RealMarketRuntime {
         return { market, result };
       }),
     );
+    await yieldToEventLoop();
 
     const descriptors: ProviderPageDescriptor[] = [];
     for (const market of REAL_MARKETS) {
@@ -414,48 +420,44 @@ export class RealMarketRuntime {
         pageScore(left, hotScores, this.repository),
     );
 
-    let nextIndex = 0;
-    const workers = Array.from(
-      {
-        length: Math.min(
-          settings.concurrency,
-          Math.max(1, descriptors.length),
-        ),
-      },
-      async () => {
-        while (!this.#stopped) {
-          const index = nextIndex;
-          nextIndex += 1;
-          const descriptor = descriptors[index];
-          if (!descriptor) {
-            return;
-          }
+    for (
+      let offset = 0;
+      offset < descriptors.length && !this.#stopped;
+      offset += settings.concurrency
+    ) {
+      const batch = descriptors.slice(
+        offset,
+        offset + settings.concurrency,
+      );
+      const results = await Promise.all(
+        batch.map(async (descriptor) => ({
+          descriptor,
+          result: await this.#fetchFullPage(descriptor, sweepId),
+        })),
+      );
 
-          const result = await this.#fetchFullPage(
-            descriptor,
-            sweepId,
+      for (const { descriptor, result } of results) {
+        const marketProgress =
+          progress.get(descriptor.market) ?? emptyProgress();
+        if (result.page) {
+          marketProgress.completedPages += 1;
+          marketProgress.instrumentRows += result.page.items.length;
+          marketProgress.providerTotal = Math.max(
+            marketProgress.providerTotal,
+            result.page.providerTotal,
           );
-          const marketProgress =
-            progress.get(descriptor.market) ?? emptyProgress();
-          if (result.page) {
-            marketProgress.completedPages += 1;
-            marketProgress.instrumentRows += result.page.items.length;
-            marketProgress.providerTotal = Math.max(
-              marketProgress.providerTotal,
-              result.page.providerTotal,
-            );
-            marketProgress.lastSuccessAt = latestIso(
-              marketProgress.lastSuccessAt,
-              result.page.receivedAt,
-            );
-          } else {
-            marketProgress.failedPages += 1;
-          }
-          progress.set(descriptor.market, marketProgress);
+          marketProgress.lastSuccessAt = latestIso(
+            marketProgress.lastSuccessAt,
+            result.page.receivedAt,
+          );
+        } else {
+          marketProgress.failedPages += 1;
         }
-      },
-    );
-    await Promise.all(workers);
+        progress.set(descriptor.market, marketProgress);
+      }
+
+      await yieldToEventLoop();
+    }
 
     const completedAt = this.clock();
     const durationMs = Math.max(
@@ -496,8 +498,6 @@ export class RealMarketRuntime {
       failedPages > 0
         ? `本轮有 ${failedPages}/${totalPages} 个全市场分片失败，已保留最后成功快照`
         : null;
-
-    void firstPages;
   }
 
   async #fetchFullPage(
@@ -509,12 +509,14 @@ export class RealMarketRuntime {
       try {
         const page = await this.#fetchRawPage(descriptor);
         const hotIds = this.#hotIdsForPage(descriptor);
-        await this.repository.upsertProviderPage(
-          page,
-          sweepId,
-          hotIds,
-        );
-        this.#emitPage(page);
+        await this.#enqueuePageWrite(async () => {
+          await this.repository.upsertProviderPage(
+            page,
+            sweepId,
+            hotIds,
+          );
+          this.#emitPage(page);
+        });
         return { page, error: null };
       } catch (error) {
         lastError = errorMessage(error);
@@ -579,61 +581,101 @@ export class RealMarketRuntime {
         .slice(0, settings.hotPagesPerRound);
       this.#hotPageCount = selected.length;
 
-      await Promise.allSettled(
-        selected.map(async ({ descriptor, instrumentIds }) => {
-          const latestState = this.repository
-            .getPageStates()
-            .find(
-              (state) =>
-                state.market === descriptor.market &&
-                state.page === descriptor.page &&
-                state.pageSize === this.config.pageSize,
-            );
-          if (
-            latestState?.lastSuccessAt &&
-            Date.now() -
-              new Date(latestState.lastSuccessAt).getTime() <
-              settings.hotRefreshIntervalMs * 0.75
-          ) {
-            return;
-          }
+      for (
+        let offset = 0;
+        offset < selected.length && !this.#stopped;
+        offset += settings.concurrency
+      ) {
+        const batch = selected.slice(
+          offset,
+          offset + settings.concurrency,
+        );
+        await Promise.allSettled(
+          batch.map(async ({ descriptor, instrumentIds }) => {
+            const latestState = this.repository
+              .getPageStates()
+              .find(
+                (state) =>
+                  state.market === descriptor.market &&
+                  state.page === descriptor.page &&
+                  state.pageSize === this.config.pageSize,
+              );
+            if (
+              latestState?.lastSuccessAt &&
+              Date.now() -
+                new Date(latestState.lastSuccessAt).getTime() <
+                settings.hotRefreshIntervalMs * 0.75
+            ) {
+              return;
+            }
 
-          try {
-            const page = await this.#fetchRawPage(descriptor);
-            await this.repository.upsertProviderPage(
-              page,
-              null,
-              instrumentIds,
-            );
-            this.#emitPage(page);
-          } catch (error) {
-            await this.repository.recordPageFailure(
-              descriptor.market,
-              descriptor.page,
-              this.config.pageSize,
-              errorMessage(error),
-              this.clock().toISOString(),
-            );
-          }
-        }),
-      );
+            try {
+              const page = await this.#fetchRawPage(descriptor);
+              await this.#enqueuePageWrite(async () => {
+                await this.repository.upsertProviderPage(
+                  page,
+                  null,
+                  instrumentIds,
+                );
+                this.#emitPage(page);
+              });
+            } catch (error) {
+              await this.repository.recordPageFailure(
+                descriptor.market,
+                descriptor.page,
+                this.config.pageSize,
+                errorMessage(error),
+                this.clock().toISOString(),
+              );
+            }
+          }),
+        );
+        await yieldToEventLoop();
+      }
     } finally {
       this.#hotRoundRunning = false;
     }
   }
 
+  #enqueuePageWrite(work: () => Promise<void>): Promise<void> {
+    const operation = this.#writeQueue.then(async () => {
+      try {
+        await work();
+      } finally {
+        await yieldToEventLoop();
+      }
+    });
+    this.#writeQueue = operation.catch(() => undefined);
+    return operation;
+  }
+
   #scheduleHotRefresh(delayMs: number): void {
-    this.#hotTimer = setTimeout(async () => {
+    this.#hotTimer = setTimeout(() => {
       this.#hotTimer = undefined;
       if (this.#stopped || !this.#running) {
         return;
       }
-      await this.#refreshHotPages();
-      if (!this.#stopped && this.#running) {
-        this.#scheduleHotRefresh(
-          this.#refreshEffectiveSettings().hotRefreshIntervalMs,
-        );
-      }
+      void this.#refreshHotPages()
+        .catch((error: unknown) => {
+          if (!this.#stopped && this.#running) {
+            this.#lastError = errorMessage(error);
+          }
+        })
+        .finally(() => {
+          if (!this.#stopped && this.#running) {
+            this.#scheduleHotRefresh(
+              this.#refreshEffectiveSettings().hotRefreshIntervalMs,
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          if (!this.#stopped && this.#running) {
+            this.#lastError = errorMessage(error);
+            this.#scheduleHotRefresh(
+              this.#effectiveSettings.hotRefreshIntervalMs,
+            );
+          }
+        });
     }, delayMs);
     this.#hotTimer.unref?.();
   }
@@ -724,10 +766,17 @@ export class RealMarketRuntime {
   }
 
   #emitPage(page: ProviderPage): void {
-    const quotes = page.items
-      .map((item) => item.quote)
-      .filter((quote): quote is NonNullable<typeof quote> => quote !== null)
-      .map((quote): Quote => ({
+    const quotes: Quote[] = [];
+    const emittedInstrumentIds = new Set<string>();
+    for (const { quote } of page.items) {
+      if (
+        !quote ||
+        emittedInstrumentIds.has(quote.instrumentId)
+      ) {
+        continue;
+      }
+      emittedInstrumentIds.add(quote.instrumentId);
+      quotes.push({
         instrumentId: quote.instrumentId,
         symbol: quote.symbol,
         market: quote.market,
@@ -742,7 +791,8 @@ export class RealMarketRuntime {
         changePercent: quote.changePercent,
         updatedAt: quote.updatedAt,
         receivedAt: quote.receivedAt,
-      }));
+      });
+    }
     if (quotes.length === 0) {
       return;
     }
@@ -832,16 +882,20 @@ function abortableDelay(
       reject(new Error("ABORTED"));
       return;
     }
-    const timer = setTimeout(resolve, milliseconds);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(new Error("ABORTED"));
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("ABORTED"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function errorMessage(error: unknown): string {
