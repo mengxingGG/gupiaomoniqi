@@ -133,7 +133,7 @@ function limitForRange(range: ChartRange): number {
   return range === "INTRADAY"
     ? 390
     : range === "DAY"
-      ? 30
+      ? 120
       : range === "MONTH"
         ? 60
         : 20;

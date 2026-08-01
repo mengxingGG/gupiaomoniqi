@@ -531,9 +531,11 @@ function historyWindow(
   if (range === "DAY") {
     return {
       klt: "101",
-      begin: formatEastmoneyDate(addDays(now, -30)),
+      // 半年日线可让 MA20 与 MACD(12,26,9) 有足够预热数据；
+      // 该请求只在用户打开股票详情时触发，不参与全市场轮询。
+      begin: formatEastmoneyDate(addDays(now, -180)),
       end,
-      limit: 60,
+      limit: 160,
     };
   }
   if (range === "MONTH") {

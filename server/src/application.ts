@@ -15,6 +15,7 @@ import type {
   ChartSeries,
   DailyCheckInStatus,
   DisplayCurrency,
+  IndustrySummary,
   Instrument,
   MarketItem,
   MarketMode,
@@ -35,6 +36,7 @@ import type {
   Transaction,
   WatchlistState,
 } from "@gupiaomoniqi/shared";
+import { UNKNOWN_INDUSTRY } from "@gupiaomoniqi/shared";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -174,6 +176,7 @@ const currencySchema = z.object({
 
 const listingSchema = z.object({
   market: z.enum(["CN", "HK", "US", "UK"]).optional(),
+  industry: z.string().trim().min(1).max(80).optional(),
   search: z.string().trim().max(80).optional(),
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().min(1).max(300).default(50),
@@ -186,6 +189,11 @@ const listingSchema = z.object({
     .enum(["true", "false"])
     .transform((value) => value === "true")
     .optional(),
+});
+
+const industryDirectorySchema = z.object({
+  market: z.enum(["CN", "HK", "US", "UK"]).optional(),
+  mode: z.enum(["VIRTUAL", "REAL"]).default("VIRTUAL"),
 });
 
 const chartSchema = z.object({
@@ -1117,6 +1125,30 @@ export async function createApplication(
   });
 
   app.get<{
+    Querystring: Record<string, string | undefined>;
+    Reply: ApiEnvelope<IndustrySummary[]> | ApiError;
+  }>("/api/industries", async (request, reply) => {
+    const parsed = industryDirectorySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_QUERY",
+        message: "行业筛选参数无效",
+      });
+    }
+
+    const instruments = parsed.data.mode === "REAL"
+      ? realRepository
+          .listInstruments()
+          .filter((instrument) => realRepository.getQuote(instrument.id))
+      : repository
+          .listInstruments()
+          .filter((instrument) => repository.getQuote(instrument.id));
+    return {
+      data: summarizeIndustries(instruments, parsed.data.market),
+    };
+  });
+
+  app.get<{
     Querystring: { mode?: MarketMode; status?: string };
     Reply: ApiEnvelope<LimitOrder[]> | ApiError;
   }>("/api/account/orders", async (request, reply) => {
@@ -1615,6 +1647,7 @@ export async function createApplication(
 
 interface ListingFilter {
   market?: StockMarket;
+  industry?: string;
   search?: string;
   page: number;
   pageSize: number;
@@ -1632,11 +1665,17 @@ function filterInstruments(
     .listInstruments()
     .filter(
       (instrument) =>
+        repository.getQuote(instrument.id) !== undefined &&
         (!instrumentIds || instrumentIds.has(instrument.id)) &&
         (!filter.market || instrument.market === filter.market) &&
+        (!filter.industry ||
+          normalizeIndustry(instrument.industry) === filter.industry) &&
         (!query ||
           instrument.symbol.toLowerCase().includes(query) ||
           instrument.name
+            .toLocaleLowerCase("zh-CN")
+            .includes(query) ||
+          normalizeIndustry(instrument.industry)
             .toLocaleLowerCase("zh-CN")
             .includes(query)),
     )
@@ -1662,7 +1701,42 @@ function toPublicInstrument(
     liquidity: _liquidity,
     ...publicInstrument
   } = instrument;
-  return publicInstrument;
+  return {
+    ...publicInstrument,
+    industry: normalizeIndustry(publicInstrument.industry),
+  };
+}
+
+function summarizeIndustries(
+  instruments: ReadonlyArray<{ market: StockMarket; industry: string }>,
+  market?: StockMarket,
+): IndustrySummary[] {
+  const counts = new Map<string, number>();
+  for (const instrument of instruments) {
+    if (market && instrument.market !== market) {
+      continue;
+    }
+    const industry = normalizeIndustry(instrument.industry);
+    counts.set(industry, (counts.get(industry) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([industry, count]) => ({ industry, count }))
+    .sort((left, right) =>
+      left.industry.localeCompare(right.industry, "zh-CN"),
+    );
+}
+
+function normalizeIndustry(industry: string): string {
+  const normalized = industry.trim();
+  return isIndustryPlaceholder(normalized)
+    ? UNKNOWN_INDUSTRY
+    : normalized;
+}
+
+function isIndustryPlaceholder(industry: string): boolean {
+  return ["", "-", "--", "N/A", "NA", "NONE", "NULL", "UNKNOWN", "未知"].includes(
+    industry.toLocaleUpperCase("en-US"),
+  );
 }
 
 function virtualMarketItem(

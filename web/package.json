@@ -1,10 +1,10 @@
 {
   "name": "@gupiaomoniqi/web",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@gupiaomoniqi/shared": "1.0.0",
+    "@gupiaomoniqi/shared": "1.0.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   }

@@ -6,6 +6,8 @@ import com.mengxinggg.gupiaomoniqi.model.ChartRange
 import com.mengxinggg.gupiaomoniqi.model.ChartSeries
 import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
+import com.mengxinggg.gupiaomoniqi.model.IndustryCount
+import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
@@ -43,6 +45,7 @@ interface StockRepository {
     suspend fun getCurrentAccount(): PublicAccount
     suspend fun updateDisplayCurrency(currency: Currency): PublicAccount
     suspend fun getMarket(query: MarketQuery): Page<MarketItem>
+    suspend fun getIndustries(mode: MarketMode, market: Market?): List<IndustryCount>
 
     suspend fun getInstrument(
         instrumentId: String,
@@ -149,6 +152,11 @@ class DefaultStockRepository(
     override suspend fun getMarket(
         query: MarketQuery,
     ): Page<MarketItem> = io { apiClient.market(query) }
+
+    override suspend fun getIndustries(
+        mode: MarketMode,
+        market: Market?,
+    ): List<IndustryCount> = io { apiClient.industries(mode, market) }
 
     override suspend fun getInstrument(
         instrumentId: String,

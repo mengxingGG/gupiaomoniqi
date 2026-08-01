@@ -29,6 +29,7 @@ export type AITraderStrategy =
 export const USD_CNY_DISPLAY_RATE = 7;
 export const VIRTUAL_TRADE_FEE_RATE = 0.0003;
 export const MINIMUM_TRADE_FEE_USD = 1;
+export const UNKNOWN_INDUSTRY = "未分类";
 
 export function quotePriceToUsd(
   price: number,
@@ -248,6 +249,11 @@ export interface PaginatedData<T> {
 export interface MarketItem {
   instrument: Instrument;
   quote: Quote;
+}
+
+export interface IndustrySummary {
+  industry: string;
+  count: number;
 }
 
 export interface Candle {

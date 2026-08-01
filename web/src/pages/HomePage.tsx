@@ -1,6 +1,7 @@
 import type {
   DailyCheckInStatus,
   DisplayCurrency,
+  IndustrySummary,
   MarketItem,
   MarketMode,
   PaginatedData,
@@ -9,11 +10,12 @@ import type {
   RealMarketStatus,
   StockMarket,
 } from "@gupiaomoniqi/shared";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   addWatchlist,
   claimDailyCheckIn,
   fetchCheckInStatus,
+  fetchIndustries,
   fetchMarket,
   fetchRealMarketStatus,
   fetchWatchlist,
@@ -26,11 +28,18 @@ import {
   signedClass,
 } from "../format";
 import {
+  changeSortLabel,
+  nextChangeSort,
+  type MarketSortBy,
+  type MarketSortOrder,
+} from "../marketView";
+import {
   type ConnectionState,
   useQuoteSocket,
 } from "../useQuoteSocket";
 
 const PAGE_SIZE = 40;
+type IndustryDirectoryState = "LOADING" | "READY" | "UNAVAILABLE";
 const EMPTY_DATA: PaginatedData<MarketItem> = {
   items: [],
   total: 0,
@@ -79,10 +88,14 @@ export function HomePage({
     new Set(),
   );
   const [watchlistOnly, setWatchlistOnly] = useState(false);
-  const [sortBy, setSortBy] = useState<"DEFAULT" | "CHANGE_PERCENT">(
-    "DEFAULT",
-  );
-  const [sortOrder, setSortOrder] = useState<"DESC" | "ASC">("DESC");
+  const [industry, setIndustry] = useState<string | undefined>();
+  const [industries, setIndustries] = useState<IndustrySummary[]>([]);
+  const [industryDirectoryState, setIndustryDirectoryState] =
+    useState<IndustryDirectoryState>("LOADING");
+  const industryRef = useRef(industry);
+  industryRef.current = industry;
+  const [sortBy, setSortBy] = useState<MarketSortBy>("DEFAULT");
+  const [sortOrder, setSortOrder] = useState<MarketSortOrder>("DESC");
   const [checkIn, setCheckIn] =
     useState<DailyCheckInStatus | null>(null);
   const [checkingIn, setCheckingIn] = useState(false);
@@ -108,8 +121,48 @@ export function HomePage({
 
   useEffect(() => {
     let active = true;
+    setIndustries([]);
+    setIndustryDirectoryState("LOADING");
+
+    void fetchIndustries(mode, market)
+      .then((result) => {
+        if (!active) {
+          return;
+        }
+        setIndustries(result);
+        setIndustryDirectoryState("READY");
+        const selectedIndustry = industryRef.current;
+        if (
+          selectedIndustry &&
+          !result.some((item) => item.industry === selectedIndustry)
+        ) {
+          setPage(1);
+          setIndustry(undefined);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setIndustries([]);
+          setIndustryDirectoryState("UNAVAILABLE");
+          if (industryRef.current) {
+            setPage(1);
+            setIndustry(undefined);
+          }
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [market, mode]);
+
+  useEffect(() => {
+    let active = true;
     let first = true;
+    let latestRequestId = 0;
+    let timer: number | null = null;
     const refresh = () => {
+      const requestId = ++latestRequestId;
       if (first) {
         setLoading(true);
         setError(null);
@@ -117,6 +170,7 @@ export function HomePage({
       void fetchMarket({
         mode,
         market,
+        industry,
         search,
         page,
         pageSize: PAGE_SIZE,
@@ -125,12 +179,12 @@ export function HomePage({
         sortOrder,
       })
         .then((result) => {
-          if (active) {
+          if (active && requestId === latestRequestId) {
             setData(sortMarketData(result, sortBy, sortOrder));
           }
         })
         .catch((nextError: unknown) => {
-          if (active) {
+          if (active && requestId === latestRequestId) {
             setError(
               nextError instanceof Error
                 ? nextError.message
@@ -139,23 +193,24 @@ export function HomePage({
           }
         })
         .finally(() => {
-          if (active && first) {
+          if (active && requestId === latestRequestId && first) {
             setLoading(false);
             first = false;
+          }
+          if (active && mode === "REAL") {
+            timer = window.setTimeout(refresh, 2_000);
           }
         });
     };
     refresh();
-    const timer =
-      mode === "REAL" ? window.setInterval(refresh, 2_000) : null;
 
     return () => {
       active = false;
       if (timer !== null) {
-        window.clearInterval(timer);
+        window.clearTimeout(timer);
       }
     };
-  }, [market, mode, page, search, watchlistOnly, sortBy, sortOrder]);
+  }, [industry, market, mode, page, search, watchlistOnly, sortBy, sortOrder]);
 
   useEffect(() => {
     if (mode !== "REAL") {
@@ -242,6 +297,10 @@ export function HomePage({
   }
 
   const pageCount = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+  const industryTotal =
+    industryDirectoryState === "READY"
+      ? industries.reduce((total, item) => total + item.count, 0)
+      : null;
 
   return (
     <main className="page-shell home-page">
@@ -362,6 +421,45 @@ export function HomePage({
           </label>
         </div>
 
+        <div className="industry-filter" aria-label="按行业筛选">
+          <span>行业</span>
+          <div className="industry-tabs">
+            <button
+              className={industry === undefined ? "active" : ""}
+              type="button"
+              onClick={() => {
+                setIndustry(undefined);
+                setPage(1);
+              }}
+            >
+              全部
+              {industryTotal === null ? null : (
+                <small>{industryTotal.toLocaleString("zh-CN")}</small>
+              )}
+            </button>
+            {industries.map((item) => (
+              <button
+                className={industry === item.industry ? "active" : ""}
+                key={item.industry}
+                type="button"
+                onClick={() => {
+                  setIndustry(item.industry);
+                  setPage(1);
+                }}
+              >
+                {item.industry}
+                <small>{item.count.toLocaleString("zh-CN")}</small>
+              </button>
+            ))}
+            {industryDirectoryState === "LOADING" ? (
+              <span className="industry-state">统计中…</span>
+            ) : null}
+            {industryDirectoryState === "UNAVAILABLE" ? (
+              <span className="industry-state">后端更新后可用</span>
+            ) : null}
+          </div>
+        </div>
+
         {error ? <div className="page-error">{error}</div> : null}
 
         <div className="market-table-wrap">
@@ -375,19 +473,16 @@ export function HomePage({
                   <button
                     className={`sortable-header ${sortBy === "CHANGE_PERCENT" ? "active" : ""}`}
                     type="button"
+                    title={`当前：${changeSortLabel(sortBy, sortOrder)}；点击切换`}
                     onClick={() => {
                       setPage(1);
-                      if (sortBy !== "CHANGE_PERCENT") {
-                        setSortBy("CHANGE_PERCENT");
-                        setSortOrder("DESC");
-                        return;
-                      }
-                      setSortOrder((current) =>
-                        current === "DESC" ? "ASC" : "DESC"
-                      );
+                      const next = nextChangeSort(sortBy, sortOrder);
+                      setSortBy(next.sortBy);
+                      setSortOrder(next.sortOrder);
                     }}
                   >
                     涨跌幅 {sortIndicator(sortBy, sortOrder)}
+                    <small>{changeSortLabel(sortBy, sortOrder)}</small>
                   </button>
                 </th>
                 <th>今开</th>
@@ -423,7 +518,7 @@ export function HomePage({
           {!loading && data.items.length === 0 ? (
             <div className="empty-table">
               <strong>没有匹配的股票</strong>
-              <span>换一个代码、名称或市场试试。</span>
+              <span>换一个代码、名称、市场或行业试试。</span>
             </div>
           ) : null}
         </div>
@@ -488,7 +583,7 @@ function MarketRow({
           <div>
             <strong>{item.instrument.name}</strong>
             <span>
-              {item.instrument.symbol} · {item.instrument.industry}
+              {item.instrument.symbol} · {item.instrument.industry || "未分类"}
             </span>
           </div>
         </div>
@@ -558,8 +653,8 @@ function MarketRow({
 function mergeQuotes(
   data: PaginatedData<MarketItem>,
   quotes: Quote[],
-  sortBy: "DEFAULT" | "CHANGE_PERCENT",
-  sortOrder: "DESC" | "ASC",
+  sortBy: MarketSortBy,
+  sortOrder: MarketSortOrder,
 ): PaginatedData<MarketItem> {
   if (quotes.length === 0 || data.items.length === 0) {
     return data;
@@ -587,8 +682,8 @@ function mergeQuotes(
 
 function sortMarketData(
   data: PaginatedData<MarketItem>,
-  sortBy: "DEFAULT" | "CHANGE_PERCENT",
-  sortOrder: "DESC" | "ASC",
+  sortBy: MarketSortBy,
+  sortOrder: MarketSortOrder,
 ): PaginatedData<MarketItem> {
   if (sortBy !== "CHANGE_PERCENT") {
     return data;
@@ -604,8 +699,8 @@ function sortMarketData(
 }
 
 function sortIndicator(
-  sortBy: "DEFAULT" | "CHANGE_PERCENT",
-  sortOrder: "DESC" | "ASC",
+  sortBy: MarketSortBy,
+  sortOrder: MarketSortOrder,
 ): string {
   if (sortBy !== "CHANGE_PERCENT") {
     return "⇅";

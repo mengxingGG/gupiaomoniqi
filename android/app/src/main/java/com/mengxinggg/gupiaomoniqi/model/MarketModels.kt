@@ -83,6 +83,11 @@ data class MarketItem(
     val quote: Quote,
 )
 
+data class IndustryCount(
+    val industry: String,
+    val count: Int,
+)
+
 data class Page<T>(
     val items: List<T>,
     val total: Int,
@@ -95,6 +100,7 @@ typealias Paginated<T> = Page<T>
 data class MarketQuery(
     val mode: MarketMode,
     val market: Market? = null,
+    val industry: String? = null,
     val search: String? = null,
     val page: Int = 1,
     val pageSize: Int = 50,
@@ -105,5 +111,8 @@ data class MarketQuery(
     init {
         require(page > 0) { "page must be positive" }
         require(pageSize in 1..300) { "pageSize must be between 1 and 300" }
+        require(industry == null || industry.isNotBlank()) {
+            "industry must not be blank"
+        }
     }
 }

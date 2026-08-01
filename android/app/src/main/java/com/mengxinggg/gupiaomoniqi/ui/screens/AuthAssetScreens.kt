@@ -49,7 +49,7 @@ import com.mengxinggg.gupiaomoniqi.ui.components.EmptyPanel
 import com.mengxinggg.gupiaomoniqi.ui.components.ErrorPanel
 import com.mengxinggg.gupiaomoniqi.ui.components.LoadingPanel
 import com.mengxinggg.gupiaomoniqi.ui.components.MarketBadge
-import com.mengxinggg.gupiaomoniqi.ui.components.ModeNotice
+import com.mengxinggg.gupiaomoniqi.ui.components.PullToRefreshContainer
 import com.mengxinggg.gupiaomoniqi.ui.components.SectionTitle
 import com.mengxinggg.gupiaomoniqi.ui.formatMoney
 import com.mengxinggg.gupiaomoniqi.ui.formatPercent
@@ -216,6 +216,8 @@ fun AuthScreen(
     }
 }
 
+private enum class OrderPage { TRANSACTIONS, ORDERS }
+
 @Composable
 fun AssetsScreen(
     state: AppUiState,
@@ -225,20 +227,22 @@ fun AssetsScreen(
     onOpenStock: (String) -> Unit,
     onCheckIn: () -> Unit,
     onRedeemGift: (String) -> Unit,
-    onCancelOrder: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var giftCode by rememberSaveable(state.mode) { mutableStateOf("") }
-    var orderFilter by rememberSaveable(state.mode) {
-        mutableStateOf(UiOrderStatus.OPEN.name)
-    }
 
-    LazyColumn(
+    PullToRefreshContainer(
+        refreshing = state.accountLoading,
+        onRefresh = onRefresh,
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(13.dp),
     ) {
-        if (state.account == null) {
+      LazyColumn(
+          modifier = Modifier.fillMaxSize(),
+          contentPadding = PaddingValues(12.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        val account = state.account
+        if (account == null) {
             item {
                 EmptyPanel(
                     title = "注册后，资产与交易都在这里",
@@ -251,28 +255,31 @@ fun AssetsScreen(
         }
 
         item {
-            SectionTitle(
-                title = "${state.account.displayName}的${modeLabel(state.mode)}账户",
-                caption = "底层按美元记账 · 与另一模拟盘完全隔离",
-                trailing = {
-                    TextButton(onClick = onLogout) { Text("退出") }
-                },
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "${account.displayName} · ${modeLabel(state.mode)}账户",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "两个模拟盘资金与持仓互相隔离",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                TextButton(onClick = onLogout) {
+                    Text("退出", style = MaterialTheme.typography.labelSmall)
+                }
+            }
         }
-        item { ModeNotice(state.mode) }
         if (state.accountError != null) {
             item { ErrorPanel(state.accountError, onRetry = onRefresh) }
-        }
-        item {
-            RewardsPanel(
-                state = state,
-                giftCode = giftCode,
-                onGiftCodeChange = { giftCode = it },
-                onCheckIn = onCheckIn,
-                onRedeemGift = {
-                    onRedeemGift(giftCode.trim())
-                },
-            )
         }
 
         if (state.accountLoading && state.portfolio == null) {
@@ -294,7 +301,7 @@ fun AssetsScreen(
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssetMetric(
                     label = "总资产",
                     value = formatMoney(portfolio.totalAssetsUsd, state.displayCurrency),
@@ -310,89 +317,7 @@ fun AssetsScreen(
                 )
             }
         }
-        item {
-            AssetMetric(
-                label = "冻结资金",
-                value = formatMoney(portfolio.frozenCashUsd, state.displayCurrency),
-                note = "未成交买入委托占用，撤单后自动释放",
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AssetMetric(
-                    label = "持仓市值",
-                    value = formatMoney(portfolio.positionsValueUsd, state.displayCurrency),
-                    note = if (state.mode == UiMarketMode.REAL) "按最新真实价" else "按最新模拟价",
-                    modifier = Modifier.weight(1f),
-                )
-                AssetMetric(
-                    label = "累计收益",
-                    value = formatMoney(
-                        portfolio.totalProfitLossUsd,
-                        state.displayCurrency,
-                        signed = true,
-                    ),
-                    note = "已实现 ${formatMoney(portfolio.realizedProfitUsd, state.displayCurrency)}",
-                    modifier = Modifier.weight(1f),
-                    movement = portfolio.totalProfitLossUsd,
-                )
-            }
-        }
-
-        item {
-            SectionTitle(
-                title = "委托订单",
-                caption = "${state.orders.count { it.status == UiOrderStatus.OPEN }} 笔等待成交",
-            )
-        }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                listOf(
-                    UiOrderStatus.OPEN.name to "进行中",
-                    UiOrderStatus.FILLED.name to "已成交",
-                    UiOrderStatus.CANCELLED.name to "已撤单",
-                    "ALL" to "全部",
-                ).forEach { (value, label) ->
-                    FilterChip(
-                        selected = orderFilter == value,
-                        onClick = { orderFilter = value },
-                        label = { Text(label) },
-                    )
-                }
-            }
-        }
-        val visibleOrders = state.orders.filter {
-            orderFilter == "ALL" || it.status.name == orderFilter
-        }
-        if (visibleOrders.isEmpty()) {
-            item {
-                EmptyPanel(
-                    title = if (orderFilter == UiOrderStatus.OPEN.name) {
-                        "暂无进行中的委托"
-                    } else {
-                        "该分类暂无订单"
-                    },
-                    description = "限价单提交后可在这里查看状态与撤单。",
-                )
-            }
-        } else {
-            items(visibleOrders, key = { it.id }) { order ->
-                LimitOrderCard(
-                    order = order,
-                    state = state,
-                    onClick = { onOpenStock(order.instrumentId) },
-                    onCancel = { onCancelOrder(order.id) },
-                )
-            }
-        }
-
-        item {
-            SectionTitle(
-                title = "当前持仓",
-                caption = "${portfolio.positions.size} 个标的",
-            )
-        }
+        item { SectionTitle(title = "当前持仓", caption = "${portfolio.positions.size} 个标的") }
         if (portfolio.positions.isEmpty()) {
             item {
                 EmptyPanel(
@@ -409,31 +334,139 @@ fun AssetsScreen(
                 )
             }
         }
-
         item {
-            SectionTitle(
-                title = "成交记录",
-                caption = if (state.mode == UiMarketMode.REAL) {
-                    "独立真实行情模拟账本"
-                } else {
-                    "独立虚拟市场账本"
-                },
-            )
-        }
-        if (state.transactions.isEmpty()) {
-            item {
-                EmptyPanel(
-                    title = "暂无成交",
-                    description = "买入或卖出后，流水会立即出现在这里。",
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssetMetric(
+                    label = "持仓市值",
+                    value = formatMoney(portfolio.positionsValueUsd, state.displayCurrency),
+                    note = if (state.mode == UiMarketMode.REAL) "按最新真实价" else "按最新模拟价",
+                    modifier = Modifier.weight(1f),
+                )
+                AssetMetric(
+                    label = "累计收益",
+                    value = formatMoney(portfolio.totalProfitLossUsd, state.displayCurrency, signed = true),
+                    note = "已实现 ${formatMoney(portfolio.realizedProfitUsd, state.displayCurrency)}",
+                    modifier = Modifier.weight(1f),
+                    movement = portfolio.totalProfitLossUsd,
                 )
             }
-        } else {
-            items(state.transactions, key = { it.id }) { transaction ->
-                TransactionCard(
-                    transaction = transaction,
-                    state = state,
-                    onClick = { onOpenStock(transaction.instrumentId) },
-                )
+        }
+        item {
+            RewardsPanel(
+                state = state,
+                giftCode = giftCode,
+                onGiftCodeChange = { giftCode = it },
+                onCheckIn = onCheckIn,
+                onRedeemGift = { onRedeemGift(giftCode.trim()) },
+            )
+        }
+      }
+    }
+}
+
+@Composable
+fun OrdersScreen(
+    state: AppUiState,
+    onLogin: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenStock: (String) -> Unit,
+    onCancelOrder: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var orderPage by rememberSaveable(state.mode) { mutableStateOf(OrderPage.TRANSACTIONS) }
+    var orderFilter by rememberSaveable(state.mode) { mutableStateOf(UiOrderStatus.OPEN.name) }
+    PullToRefreshContainer(
+        refreshing = state.accountLoading,
+        onRefresh = onRefresh,
+        modifier = modifier.fillMaxSize(),
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (state.account == null) {
+                item {
+                    EmptyPanel(
+                        title = "登录后查看订单",
+                        description = "成交和委托记录按两个模拟盘分别保存。",
+                        action = "注册或登录",
+                        onAction = onLogin,
+                    )
+                }
+                return@LazyColumn
+            }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = orderPage == OrderPage.TRANSACTIONS,
+                        onClick = { orderPage = OrderPage.TRANSACTIONS },
+                        label = { Text("成交记录") },
+                    )
+                    FilterChip(
+                        selected = orderPage == OrderPage.ORDERS,
+                        onClick = { orderPage = OrderPage.ORDERS },
+                        label = { Text("委托订单") },
+                    )
+                }
+            }
+            if (state.accountError != null) {
+                item { ErrorPanel(state.accountError, onRetry = onRefresh) }
+            }
+            if (state.accountLoading && state.transactions.isEmpty() && state.orders.isEmpty()) {
+                item { LoadingPanel("正在同步订单…") }
+            } else if (orderPage == OrderPage.TRANSACTIONS) {
+                if (state.transactions.isEmpty()) {
+                    item { EmptyPanel("暂无成交", "买入或卖出后，流水会立即出现在这里。") }
+                } else {
+                    items(state.transactions, key = { it.id }) { transaction ->
+                        TransactionCard(transaction, state) { onOpenStock(transaction.instrumentId) }
+                    }
+                }
+            } else if (state.ordersUnavailable) {
+                item {
+                    EmptyPanel(
+                        title = "服务器版本过旧，请先更新后端",
+                        description = "资产、持仓和成交记录仍可正常使用。",
+                    )
+                }
+            } else {
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        listOf(
+                            UiOrderStatus.OPEN.name to "进行中",
+                            UiOrderStatus.FILLED.name to "已成交",
+                            UiOrderStatus.CANCELLED.name to "已撤单",
+                            "ALL" to "全部",
+                        ).forEach { (value, label) ->
+                            FilterChip(
+                                selected = orderFilter == value,
+                                onClick = { orderFilter = value },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                            )
+                        }
+                    }
+                }
+                val visibleOrders = state.orders.filter {
+                    orderFilter == "ALL" || it.status.name == orderFilter
+                }
+                if (visibleOrders.isEmpty()) {
+                    item {
+                        EmptyPanel(
+                            title = if (orderFilter == UiOrderStatus.OPEN.name) "暂无进行中的委托" else "该分类暂无订单",
+                            description = "限价单提交后可在这里查看状态与撤单。",
+                        )
+                    }
+                } else {
+                    items(visibleOrders, key = { it.id }) { order ->
+                        LimitOrderCard(
+                            order = order,
+                            state = state,
+                            onClick = { onOpenStock(order.instrumentId) },
+                            onCancel = { onCancelOrder(order.id) },
+                        )
+                    }
+                }
             }
         }
     }

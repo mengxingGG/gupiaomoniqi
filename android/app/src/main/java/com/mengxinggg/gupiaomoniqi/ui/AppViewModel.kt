@@ -14,6 +14,7 @@ import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
+import com.mengxinggg.gupiaomoniqi.model.MarketSort
 import com.mengxinggg.gupiaomoniqi.model.LimitOrder
 import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
 import com.mengxinggg.gupiaomoniqi.model.OrderBook
@@ -26,6 +27,7 @@ import com.mengxinggg.gupiaomoniqi.model.TradeRequest
 import com.mengxinggg.gupiaomoniqi.model.TradeSide
 import com.mengxinggg.gupiaomoniqi.model.Transaction
 import com.mengxinggg.gupiaomoniqi.model.Watchlist
+import com.mengxinggg.gupiaomoniqi.model.SortOrder
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -75,11 +77,15 @@ private data class SilentDetailRefresh(
     val chartNotice: String?,
 )
 
-private data class AccountSnapshot(
+private data class AssetsSnapshot(
     val portfolio: Portfolio,
+    val checkIn: DailyCheckInStatus,
+)
+
+private data class OrdersSnapshot(
     val transactions: List<Transaction>,
     val orders: List<LimitOrder>,
-    val checkIn: DailyCheckInStatus,
+    val ordersUnavailable: Boolean,
 )
 
 class AppViewModel(
@@ -97,6 +103,7 @@ class AppViewModel(
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
 
     private var marketJob: Job? = null
+    private var industriesJob: Job? = null
     private var searchJob: Job? = null
     private var detailJob: Job? = null
     private var chartJob: Job? = null
@@ -108,9 +115,11 @@ class AppViewModel(
     private var pendingTrade: PendingTrade? = null
     private var activeTradeAttemptId: String? = null
     private var giftAttempt: GiftAttempt? = null
+    private val ordersCapability = OrdersEndpointCapability()
     private var serverEpoch = 0L
     private var sessionEpoch = 0L
     private var marketRequestId = 0L
+    private var industriesRequestId = 0L
     private var detailRequestId = 0L
     private var chartRequestId = 0L
     private var watchlistRequestId = 0L
@@ -124,6 +133,7 @@ class AppViewModel(
     init {
         if (initialServerUrl.isNotBlank()) {
             loadMarket(reset = true)
+            loadIndustries()
             restoreSession()
         }
     }
@@ -163,7 +173,8 @@ class AppViewModel(
         when (tab) {
             MainTab.MARKET -> Unit
             MainTab.WATCHLIST -> loadWatchlist()
-            MainTab.ASSETS -> loadAccountData()
+            MainTab.ORDERS -> loadOrderData()
+            MainTab.ASSETS -> loadAssetsData()
         }
     }
 
@@ -198,6 +209,11 @@ class AppViewModel(
                 marketPage = 1,
                 marketTotal = 0,
                 marketError = null,
+                industryFilter = null,
+                industryOptions = emptyList(),
+                industriesLoading = true,
+                industryDirectoryNotice = null,
+                changeSort = ChangeSort.DEFAULT,
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 selectedInstrumentId = null,
@@ -207,6 +223,7 @@ class AppViewModel(
                 portfolio = null,
                 transactions = emptyList(),
                 orders = emptyList(),
+                ordersUnavailable = false,
                 detailLoading = current.screen == AppScreen.DETAIL && selectedIdentity != null,
                 chartLoading = current.screen == AppScreen.DETAIL && selectedIdentity != null,
                 detailError = null,
@@ -215,9 +232,10 @@ class AppViewModel(
             )
         }
         loadMarket(reset = true)
+        loadIndustries()
         if (_uiState.value.account != null) {
             loadWatchlist()
-            if (_uiState.value.selectedTab == MainTab.ASSETS) loadAccountData()
+            loadSelectedAccountTab()
         }
         if (current.screen == AppScreen.DETAIL) {
             if (selectedIdentity == null) {
@@ -341,12 +359,33 @@ class AppViewModel(
 
     fun setMarketFilter(filter: MarketFilter) {
         if (_uiState.value.marketFilter == filter) return
-        _uiState.update { it.copy(marketFilter = filter) }
+        _uiState.update {
+            it.copy(
+                marketFilter = filter,
+                industryOptions = emptyList(),
+                industriesLoading = true,
+                industryDirectoryNotice = null,
+            )
+        }
+        loadMarket(reset = true)
+        loadIndustries()
+    }
+
+    fun setIndustryFilter(industry: String?) {
+        val normalized = industry?.trim()?.takeIf(String::isNotEmpty)
+        if (_uiState.value.industryFilter == normalized) return
+        _uiState.update { it.copy(industryFilter = normalized) }
+        loadMarket(reset = true)
+    }
+
+    fun cycleChangeSort() {
+        _uiState.update { it.copy(changeSort = it.changeSort.next()) }
         loadMarket(reset = true)
     }
 
     fun refreshMarket() {
         loadMarket(reset = true, refreshing = _uiState.value.marketItems.isNotEmpty())
+        loadIndustries()
     }
 
     fun loadMoreMarket() {
@@ -527,6 +566,7 @@ class AppViewModel(
                         reset = true,
                         refreshing = _uiState.value.marketItems.isNotEmpty(),
                     )
+                    loadIndustries()
                     return@launch
                 }
 
@@ -534,13 +574,16 @@ class AppViewModel(
                 liveRefreshJob = null
                 liveRefreshPausedForSwitch = true
                 serverEpoch += 1
+                ordersCapability.clear()
                 sessionEpoch += 1
                 marketJob?.cancel()
+                industriesJob?.cancel()
                 detailJob?.cancel()
                 chartJob?.cancel()
                 authJob?.cancel()
                 tradeJob?.cancel()
                 marketRequestId += 1
+                industriesRequestId += 1
                 detailRequestId += 1
                 chartRequestId += 1
                 watchlistRequestId += 1
@@ -565,6 +608,7 @@ class AppViewModel(
                         portfolio = null,
                         transactions = emptyList(),
                         orders = emptyList(),
+                        ordersUnavailable = false,
                         watchlistIds = emptySet(),
                         watchlistItems = emptyList(),
                         checkIn = null,
@@ -580,12 +624,17 @@ class AppViewModel(
                         rewardBusy = false,
                         accountLoading = false,
                         marketItems = emptyList(),
+                        industryFilter = null,
+                        industryOptions = emptyList(),
+                        industriesLoading = true,
+                        industryDirectoryNotice = null,
                         marketTotal = 0,
                         marketLoading = true,
                         marketError = null,
                     )
                 }
                 loadMarket(reset = true)
+                loadIndustries()
                 if (liveRefreshRequested) startLiveRefresh()
             } catch (error: CancellationException) {
                 throw error
@@ -683,6 +732,7 @@ class AppViewModel(
                 portfolio = null,
                 transactions = emptyList(),
                 orders = emptyList(),
+                ordersUnavailable = false,
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,
@@ -762,7 +812,11 @@ class AppViewModel(
     }
 
     fun refreshAccount() {
-        loadAccountData()
+        when (_uiState.value.selectedTab) {
+            MainTab.ORDERS -> loadOrderData(forceOrdersProbe = true)
+            MainTab.ASSETS -> loadAssetsData()
+            else -> Unit
+        }
     }
 
     fun claimCheckIn() {
@@ -996,8 +1050,13 @@ class AppViewModel(
                             },
                     )
                 }
-                loadTransactions()
-                loadOrders()
+                if (
+                    _uiState.value.screen == AppScreen.MAIN &&
+                    _uiState.value.selectedTab == MainTab.ORDERS
+                ) {
+                    loadTransactions()
+                    loadOrders()
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1072,7 +1131,7 @@ class AppViewModel(
                         transientMessage = error.userMessage("撤单失败，请重试"),
                     )
                 }
-                loadAccountData()
+                loadSelectedAccountTab()
             }
         }
     }
@@ -1119,6 +1178,74 @@ class AppViewModel(
         }
     }
 
+    private fun loadIndustries() {
+        val snapshot = _uiState.value
+        if (!snapshot.serverConfigured) return
+        industriesJob?.cancel()
+        val requestId = ++industriesRequestId
+        val requestServerEpoch = serverEpoch
+        val mode = snapshot.mode
+        val market = snapshot.marketFilter
+        _uiState.update {
+            it.copy(
+                industriesLoading = true,
+                industryDirectoryNotice = null,
+            )
+        }
+        industriesJob = viewModelScope.launch {
+            val remote = try {
+                Result.success(
+                    repository.getIndustries(mode.toModel(), market.toModelOrNull()),
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Result.failure(error)
+            }
+            val current = _uiState.value
+            if (
+                requestId != industriesRequestId ||
+                requestServerEpoch != serverEpoch ||
+                current.mode != mode ||
+                current.marketFilter != market
+            ) return@launch
+            remote.onSuccess { counts ->
+                val resolution = resolveIndustryDirectory(counts, current.industryFilter)
+                _uiState.update {
+                    it.copy(
+                        industryOptions = resolution.options,
+                        industriesLoading = false,
+                        industryDirectoryNotice = null,
+                        industryFilter = resolution.selectedIndustry,
+                    )
+                }
+                if (resolution.shouldReloadMarket) {
+                    loadMarket(reset = true)
+                }
+            }.onFailure { error ->
+                val resolution = resolveIndustryDirectoryFailure(
+                    error = error,
+                    selectedIndustry = current.industryFilter,
+                )
+                _uiState.update {
+                    it.copy(
+                        industryOptions = if (error.isMissingIndustriesEndpoint()) {
+                            emptyList()
+                        } else {
+                            it.industryOptions
+                        },
+                        industryFilter = resolution.selectedIndustry,
+                        industriesLoading = false,
+                        industryDirectoryNotice = resolution.notice,
+                    )
+                }
+                if (resolution.shouldReloadMarket) {
+                    loadMarket(reset = true)
+                }
+            }
+        }
+    }
+
     private fun loadMarket(reset: Boolean, refreshing: Boolean = false) {
         if (!_uiState.value.serverConfigured) {
             _uiState.update {
@@ -1140,6 +1267,8 @@ class AppViewModel(
         val page = if (reset) 1 else snapshot.marketPage + 1
         val mode = snapshot.mode
         val filter = snapshot.marketFilter
+        val industry = snapshot.industryFilter
+        val changeSort = snapshot.changeSort
         val search = snapshot.searchQuery.trim().ifBlank { null }
         _uiState.update {
             it.copy(
@@ -1157,9 +1286,12 @@ class AppViewModel(
                     MarketQuery(
                         mode = mode.toModel(),
                         market = filter.toModelOrNull(),
+                        industry = industry,
                         search = search,
                         page = page,
                         pageSize = MARKET_PAGE_SIZE,
+                        sortBy = changeSort.toMarketSort(),
+                        sortOrder = changeSort.toSortOrder(),
                     ),
                 )
             }.onSuccess { result ->
@@ -1168,6 +1300,8 @@ class AppViewModel(
                     requestServerEpoch != serverEpoch ||
                     _uiState.value.mode != mode ||
                     _uiState.value.marketFilter != filter ||
+                    _uiState.value.industryFilter != industry ||
+                    _uiState.value.changeSort != changeSort ||
                     _uiState.value.searchQuery.trim().ifBlank { null } != search
                 ) {
                     return@onSuccess
@@ -1403,7 +1537,15 @@ class AppViewModel(
         }
     }
 
-    private fun loadAccountData() {
+    private fun loadSelectedAccountTab() {
+        when (_uiState.value.selectedTab) {
+            MainTab.ORDERS -> loadOrderData()
+            MainTab.ASSETS -> loadAssetsData()
+            else -> Unit
+        }
+    }
+
+    private fun loadAssetsData() {
         if (_uiState.value.cancellingOrderId != null) return
         val context = privateRequestContext() ?: return
         val requestId = ++accountRequestId
@@ -1413,13 +1555,9 @@ class AppViewModel(
             runCatching {
                 coroutineScope {
                     val portfolio = async { repository.getPortfolio(context.mode.toModel()) }
-                    val transactions = async { repository.getTransactions(context.mode.toModel()) }
-                    val orders = async { repository.getOrders(context.mode.toModel()) }
                     val checkIn = async { repository.getCheckInStatus() }
-                    AccountSnapshot(
+                    AssetsSnapshot(
                         portfolio = portfolio.await(),
-                        transactions = transactions.await(),
-                        orders = orders.await(),
                         checkIn = checkIn.await(),
                     )
                 }
@@ -1434,8 +1572,6 @@ class AppViewModel(
                 _uiState.update {
                     it.copy(
                         portfolio = snapshot.portfolio.toUi(),
-                        transactions = snapshot.transactions.map(Transaction::toUi),
-                        orders = snapshot.orders.map(LimitOrder::toUi),
                         checkIn = snapshot.checkIn.toUi(),
                         accountLoading = false,
                         accountError = null,
@@ -1457,6 +1593,84 @@ class AppViewModel(
                         accountError = error.userMessage("资产读取失败"),
                     )
                 }
+            }
+        }
+    }
+
+    private fun loadOrderData(forceOrdersProbe: Boolean = false) {
+        if (_uiState.value.cancellingOrderId != null) return
+        val context = privateRequestContext() ?: return
+        val requestId = ++accountRequestId
+        val mutationEpoch = portfolioMutationEpoch
+        _uiState.update { it.copy(accountLoading = true, accountError = null) }
+        viewModelScope.launch {
+            runCatching {
+                coroutineScope {
+                    val transactions = async {
+                        repository.getTransactions(context.mode.toModel())
+                    }
+                    val orders = async {
+                        loadOrdersCompatible(context, forceOrdersProbe)
+                    }
+                    val orderResult = orders.await()
+                    OrdersSnapshot(
+                        transactions = transactions.await(),
+                        orders = orderResult.first,
+                        ordersUnavailable = orderResult.second,
+                    )
+                }
+            }.onSuccess { snapshot ->
+                if (
+                    requestId != accountRequestId ||
+                    mutationEpoch != portfolioMutationEpoch ||
+                    !privateContextMatches(context)
+                ) return@onSuccess
+                _uiState.update {
+                    it.copy(
+                        transactions = snapshot.transactions.map(Transaction::toUi),
+                        orders = snapshot.orders.map(LimitOrder::toUi),
+                        ordersUnavailable = snapshot.ordersUnavailable,
+                        accountLoading = false,
+                        accountError = null,
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (
+                    requestId != accountRequestId ||
+                    mutationEpoch != portfolioMutationEpoch ||
+                    !privateContextMatches(context)
+                ) return@onFailure
+                if (handleSessionExpiry(error)) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        accountLoading = false,
+                        accountError = error.userMessage("订单读取失败"),
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun loadOrdersCompatible(
+        context: PrivateRequestContext,
+        forceProbe: Boolean = false,
+    ): Pair<List<LimitOrder>, Boolean> {
+        if (!forceProbe && ordersCapability.shouldSkip(context.serverEpoch, context.mode)) {
+            return emptyList<LimitOrder>() to true
+        }
+        return try {
+            repository.getOrders(context.mode.toModel()).also {
+                ordersCapability.recordAvailable(context.serverEpoch, context.mode)
+            } to false
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (error.isMissingOrdersEndpoint()) {
+                ordersCapability.recordMissing(context.serverEpoch, context.mode)
+                emptyList<LimitOrder>() to true
+            } else {
+                throw error
             }
         }
     }
@@ -1519,9 +1733,7 @@ class AppViewModel(
                         )
                     }
                 }
-            if (_uiState.value.selectedTab == MainTab.ASSETS) {
-                loadAccountData()
-            }
+            loadSelectedAccountTab()
         }
     }
 
@@ -1559,15 +1771,18 @@ class AppViewModel(
         val requestId = ++ordersRequestId
         val mutationEpoch = portfolioMutationEpoch
         viewModelScope.launch {
-            runCatching { repository.getOrders(context.mode.toModel()) }
-                .onSuccess { orders ->
+            runCatching { loadOrdersCompatible(context) }
+                .onSuccess { result ->
                     if (
                         requestId == ordersRequestId &&
                         mutationEpoch == portfolioMutationEpoch &&
                         privateContextMatches(context)
                     ) {
                         _uiState.update {
-                            it.copy(orders = orders.map(LimitOrder::toUi))
+                            it.copy(
+                                orders = result.first.map(LimitOrder::toUi),
+                                ordersUnavailable = result.second,
+                            )
                         }
                     }
                 }
@@ -1607,6 +1822,9 @@ class AppViewModel(
             AppScreen.MAIN -> when (state.selectedTab) {
                 MainTab.MARKET -> refreshMarketSilently()
                 MainTab.WATCHLIST -> refreshWatchlistSilently()
+                MainTab.ORDERS -> {
+                    if (cycle % 2L == 0L) refreshOrdersSilently()
+                }
                 MainTab.ASSETS -> {
                     if (cycle % 2L == 0L) refreshAssetsSilently()
                 }
@@ -1627,6 +1845,8 @@ class AppViewModel(
         val requestServerEpoch = serverEpoch
         val mode = snapshot.mode
         val filter = snapshot.marketFilter
+        val industry = snapshot.industryFilter
+        val changeSort = snapshot.changeSort
         val search = snapshot.searchQuery.trim().ifBlank { null }
         val refreshCount = snapshot.marketItems.size
             .coerceAtLeast(MARKET_PAGE_SIZE)
@@ -1637,9 +1857,12 @@ class AppViewModel(
                 MarketQuery(
                     mode = mode.toModel(),
                     market = filter.toModelOrNull(),
+                    industry = industry,
                     search = search,
                     page = 1,
                     pageSize = refreshCount,
+                    sortBy = changeSort.toMarketSort(),
+                    sortOrder = changeSort.toSortOrder(),
                 ),
             )
         } catch (error: CancellationException) {
@@ -1655,6 +1878,8 @@ class AppViewModel(
             requestServerEpoch != serverEpoch ||
             current.mode != mode ||
             current.marketFilter != filter ||
+            current.industryFilter != industry ||
+            current.changeSort != changeSort ||
             current.searchQuery.trim().ifBlank { null } != search ||
             current.marketLoading ||
             current.marketRefreshing ||
@@ -1709,19 +1934,8 @@ class AppViewModel(
             _uiState.value.accountLoading ||
             _uiState.value.cancellingOrderId != null
         ) return
-        val result = try {
-            coroutineScope {
-                val portfolio = async {
-                    repository.getPortfolio(context.mode.toModel())
-                }
-                val transactions = async {
-                    repository.getTransactions(context.mode.toModel())
-                }
-                val orders = async {
-                    repository.getOrders(context.mode.toModel())
-                }
-                Triple(portfolio.await(), transactions.await(), orders.await())
-            }
+        val portfolio = try {
+            repository.getPortfolio(context.mode.toModel())
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -1740,9 +1954,44 @@ class AppViewModel(
         ) {
             _uiState.update {
                 it.copy(
-                    portfolio = result.first.toUi(),
-                    transactions = result.second.map(Transaction::toUi),
-                    orders = result.third.map(LimitOrder::toUi),
+                    portfolio = portfolio.toUi(),
+                    accountError = null,
+                )
+            }
+        }
+    }
+
+    private suspend fun refreshOrdersSilently() {
+        val context = privateRequestContext() ?: return
+        val mutationEpoch = portfolioMutationEpoch
+        if (_uiState.value.accountLoading || _uiState.value.cancellingOrderId != null) return
+        val result = try {
+            coroutineScope {
+                val transactions = async {
+                    repository.getTransactions(context.mode.toModel())
+                }
+                val orders = async { loadOrdersCompatible(context) }
+                transactions.await() to orders.await()
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (privateContextMatches(context)) handleSessionExpiry(error)
+            return
+        }
+        val current = _uiState.value
+        if (
+            current.screen == AppScreen.MAIN &&
+            current.selectedTab == MainTab.ORDERS &&
+            mutationEpoch == portfolioMutationEpoch &&
+            privateContextMatches(context) &&
+            !current.accountLoading
+        ) {
+            _uiState.update {
+                it.copy(
+                    transactions = result.first.map(Transaction::toUi),
+                    orders = result.second.first.map(LimitOrder::toUi),
+                    ordersUnavailable = result.second.second,
                     accountError = null,
                 )
             }
@@ -1910,6 +2159,7 @@ class AppViewModel(
                 portfolio = null,
                 transactions = emptyList(),
                 orders = emptyList(),
+                ordersUnavailable = false,
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,
@@ -1981,6 +2231,12 @@ private fun MarketFilter.toModelOrNull(): Market? = when (this) {
     MarketFilter.UK -> Market.UK
 }
 
+private fun ChangeSort.toMarketSort(): MarketSort =
+    if (this == ChangeSort.DEFAULT) MarketSort.DEFAULT else MarketSort.CHANGE_PERCENT
+
+private fun ChangeSort.toSortOrder(): SortOrder =
+    if (this == ChangeSort.ASC) SortOrder.ASC else SortOrder.DESC
+
 private fun UiChartRange.toModel(): ChartRange = ChartRange.valueOf(name)
 
 private fun UiTradeSide.toModel(): TradeSide = TradeSide.valueOf(name)
@@ -2013,13 +2269,14 @@ private fun MarketItem.toUi(): StockUi = StockUi(
     updatedAt = quote.receivedAt ?: quote.updatedAt,
 )
 
-private fun Candle.toUi(): CandleUi = CandleUi(
+internal fun Candle.toUi(): CandleUi = CandleUi(
     time = time,
     open = open,
     high = high,
     low = low,
     close = close,
     volume = volume.toDouble(),
+    averagePrice = averagePrice,
 )
 
 private fun OrderBookLevel.toUi(): OrderBookLevelUi = OrderBookLevelUi(

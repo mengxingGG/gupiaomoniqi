@@ -53,6 +53,12 @@ describe("LLMTradingService", () => {
       thresholdUsd: 100_000,
       topUpUsd: 1_000_000,
     });
+    expect(service.getStatus()).toMatchObject({
+      completedRequests: 1,
+      runningRequests: 0,
+    });
+    expect(service.getStatus().lastRequestLatencyMs).toBeGreaterThanOrEqual(0);
+    expect(service.getStatus().averageRequestLatencyMs).toBeGreaterThanOrEqual(0);
   });
 
   it("通讯失败不补资金、不执行并开启熔断", async () => {
@@ -127,10 +133,61 @@ describe("LLMTradingService", () => {
     expect(ensureSpy).not.toHaveBeenCalled();
     expect(events).toEqual([]);
   });
+
+  it("连续 HOLD 从第二次开始保守延长调度且交易后恢复正常频率", async () => {
+    const events: string[] = [];
+    const port = new FakePort(events);
+    port.contextValue = {
+      ...context(),
+      recentActivity: [
+        {
+          at: "2026-08-01T11:58:00.000Z",
+          action: "HOLD",
+          instrumentId: null,
+          result: "HOLD",
+        },
+        {
+          at: "2026-08-01T11:59:00.000Z",
+          action: "HOLD",
+          instrumentId: null,
+          result: "HOLD",
+        },
+      ],
+    };
+    port.executionResult = { state: "HOLD" };
+    const service = new LLMTradingService(
+      config(),
+      {
+        checkAvailability: async () => undefined,
+        requestDecision: async () => holdDecision(),
+      },
+      port,
+      () => new Date("2026-08-01T12:00:00.000Z"),
+      () => 0.5,
+    );
+
+    expect((await service.runDue()).held).toBe(1);
+    expect(port.completion?.nextActionAt).toBe(
+      "2026-08-01T12:04:00.000Z",
+    );
+
+    port.contextValue = context();
+    port.executionResult = { state: "EXECUTED", transactionId: "tx-2" };
+    expect((await service.runDue()).executed).toBe(1);
+    expect(port.completion?.nextActionAt).toBe(
+      "2026-08-01T12:01:00.000Z",
+    );
+  });
 });
 
 class FakePort implements LLMTradingPort {
   personas: readonly LLMTraderPersona[] = [];
+  contextValue = context();
+  executionResult: LLMDecisionExecutionResult = {
+    state: "EXECUTED",
+    transactionId: "tx-1",
+  };
+  completion: LLMAgentRunCompletion | null = null;
   cashRequest: {
     traderId: string;
     thresholdUsd: number;
@@ -153,7 +210,7 @@ class FakePort implements LLMTradingPort {
 
   async buildContext(): Promise<LLMTradingContext> {
     this.events.push("context");
-    return context();
+    return this.contextValue;
   }
 
   async ensureCashFloor(
@@ -168,14 +225,15 @@ class FakePort implements LLMTradingPort {
 
   async executeDecision(): Promise<LLMDecisionExecutionResult> {
     this.events.push("execute");
-    return { state: "EXECUTED", transactionId: "tx-1" };
+    return this.executionResult;
   }
 
   async completeAgentRun(
     _agent: LLMTraderAgent,
-    _completion: LLMAgentRunCompletion,
+    completion: LLMAgentRunCompletion,
   ): Promise<void> {
     this.events.push("complete");
+    this.completion = completion;
   }
 }
 
@@ -207,6 +265,19 @@ function buyDecision() {
     positionPercent: 0,
     confidence: 0.8,
     reason: "趋势和订单流一致",
+  };
+}
+
+function holdDecision() {
+  return {
+    action: "HOLD",
+    instrumentId: null,
+    orderType: null,
+    limitPrice: null,
+    allocationPercent: 0,
+    positionPercent: 0,
+    confidence: 0.7,
+    reason: "当前没有足够优势",
   };
 }
 

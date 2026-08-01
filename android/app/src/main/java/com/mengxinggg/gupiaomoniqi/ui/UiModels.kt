@@ -9,6 +9,7 @@ enum class AppScreen {
 enum class MainTab(val label: String) {
     MARKET("行情"),
     WATCHLIST("自选"),
+    ORDERS("订单"),
     ASSETS("资产"),
 }
 
@@ -28,6 +29,18 @@ enum class MarketFilter(val label: String) {
     HK("港股"),
     US("美股"),
     UK("英股"),
+}
+
+enum class ChangeSort(val label: String) {
+    DEFAULT("涨跌幅"),
+    DESC("涨跌幅 ↓"),
+    ASC("涨跌幅 ↑"),
+}
+
+internal fun ChangeSort.next(): ChangeSort = when (this) {
+    ChangeSort.DEFAULT -> ChangeSort.DESC
+    ChangeSort.DESC -> ChangeSort.ASC
+    ChangeSort.ASC -> ChangeSort.DEFAULT
 }
 
 enum class UiChartRange(val label: String) {
@@ -84,6 +97,11 @@ data class StockUi(
     val updatedAt: String,
 )
 
+data class IndustryCountUi(
+    val industry: String,
+    val count: Int,
+)
+
 data class CandleUi(
     val time: String,
     val open: Double,
@@ -91,6 +109,7 @@ data class CandleUi(
     val low: Double,
     val close: Double,
     val volume: Double,
+    val averagePrice: Double? = null,
 )
 
 data class OrderBookLevelUi(
@@ -194,6 +213,11 @@ data class AppUiState(
     val serverError: String? = null,
     val serverSaving: Boolean = false,
     val marketFilter: MarketFilter = MarketFilter.ALL,
+    val industryFilter: String? = null,
+    val industryOptions: List<IndustryCountUi> = emptyList(),
+    val industriesLoading: Boolean = false,
+    val industryDirectoryNotice: String? = null,
+    val changeSort: ChangeSort = ChangeSort.DEFAULT,
     val searchQuery: String = "",
     val marketItems: List<StockUi> = emptyList(),
     val marketPage: Int = 1,
@@ -217,6 +241,7 @@ data class AppUiState(
     val portfolio: PortfolioUi? = null,
     val transactions: List<TransactionUi> = emptyList(),
     val orders: List<LimitOrderUi> = emptyList(),
+    val ordersUnavailable: Boolean = false,
     val accountLoading: Boolean = false,
     val accountError: String? = null,
     val cancellingOrderId: String? = null,

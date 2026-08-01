@@ -20,6 +20,7 @@ import {
 import { AccountPage } from "./pages/AccountPage";
 import { AuthPage } from "./pages/AuthPage";
 import { HomePage } from "./pages/HomePage";
+import { OrdersPage, type OrdersTab } from "./pages/OrdersPage";
 import { StockPage } from "./pages/StockPage";
 import type { ConnectionState } from "./useQuoteSocket";
 
@@ -27,6 +28,7 @@ type Route =
   | { page: "home"; mode: MarketMode }
   | { page: "stock"; mode: MarketMode; instrumentId: string }
   | { page: "account"; mode: MarketMode }
+  | { page: "orders"; mode: MarketMode; tab: OrdersTab }
   | { page: "auth"; mode: MarketMode };
 
 const DISPLAY_CURRENCY_KEY = "stock-simulator-display-currency";
@@ -196,7 +198,14 @@ export function App() {
             type="button"
             onClick={() => navigate(accountPath(mode))}
           >
-            账户与交易
+            资产
+          </button>
+          <button
+            className={route.page === "orders" ? "active" : ""}
+            type="button"
+            onClick={() => navigate(ordersPath(mode, "ORDERS"))}
+          >
+            订单
           </button>
         </nav>
 
@@ -281,6 +290,30 @@ export function App() {
         </div>
       </header>
 
+      <nav className="mobile-main-nav" aria-label="移动端主导航">
+        <button
+          className={route.page === "home" ? "active" : ""}
+          type="button"
+          onClick={() => navigate(modeRoot(mode))}
+        >
+          行情
+        </button>
+        <button
+          className={route.page === "account" ? "active" : ""}
+          type="button"
+          onClick={() => navigate(accountPath(mode))}
+        >
+          资产
+        </button>
+        <button
+          className={route.page === "orders" ? "active" : ""}
+          type="button"
+          onClick={() => navigate(ordersPath(mode, "ORDERS"))}
+        >
+          订单
+        </button>
+      </nav>
+
       {route.page === "home" ? (
         <HomePage
           account={account}
@@ -318,6 +351,20 @@ export function App() {
         />
       ) : null}
 
+      {route.page === "orders" ? (
+        <OrdersPage
+          account={account}
+          displayCurrency={displayCurrency}
+          mode={mode}
+          onOpenStock={(instrumentId) =>
+            navigate(stockPath(mode, instrumentId))
+          }
+          onRequireAuth={requireAuth}
+          onTabChange={(tab) => navigate(ordersPath(mode, tab))}
+          tab={route.tab}
+        />
+      ) : null}
+
       {route.page === "auth" ? (
         <AuthPage
           onAuthenticated={handleAuthenticated}
@@ -343,6 +390,16 @@ function parseRoute(pathname: string): Route {
     return { page: "account", mode };
   }
 
+  if (localPath === "/orders" || localPath === "/orders/transactions") {
+    return {
+      page: "orders",
+      mode,
+      tab: localPath.endsWith("/transactions")
+        ? "TRANSACTIONS"
+        : "ORDERS",
+    };
+  }
+
   if (localPath === "/auth" || localPath === "/login") {
     return { page: "auth", mode };
   }
@@ -366,6 +423,11 @@ function modeRoot(mode: MarketMode): string {
 
 function accountPath(mode: MarketMode): string {
   return mode === "REAL" ? "/real/account" : "/account";
+}
+
+function ordersPath(mode: MarketMode, tab: OrdersTab): string {
+  const prefix = mode === "REAL" ? "/real" : "";
+  return `${prefix}/orders${tab === "TRANSACTIONS" ? "/transactions" : ""}`;
 }
 
 function stockPath(mode: MarketMode, instrumentId: string): string {

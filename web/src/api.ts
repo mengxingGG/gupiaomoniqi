@@ -6,6 +6,7 @@ import type {
   ChartSeries,
   DisplayCurrency,
   DailyCheckInStatus,
+  IndustrySummary,
   LimitOrder,
   MarketItem,
   MarketMode,
@@ -31,6 +32,7 @@ const AUTH_STORAGE_KEY = "stock-simulator-auth";
 export interface MarketQuery {
   mode: MarketMode;
   market?: StockMarket;
+  industry?: string;
   search?: string;
   page: number;
   pageSize: number;
@@ -125,6 +127,9 @@ export async function fetchMarket(
   if (query.market) {
     params.set("market", query.market);
   }
+  if (query.industry) {
+    params.set("industry", query.industry);
+  }
   if (query.search) {
     params.set("search", query.search);
   }
@@ -207,6 +212,23 @@ export function executeTrade(
     method: "POST",
     body: JSON.stringify({ ...trade, mode }),
   });
+}
+
+export function fetchIndustries(
+  mode: MarketMode,
+  market?: StockMarket,
+): Promise<IndustrySummary[]> {
+  const params = new URLSearchParams({ mode });
+
+  if (market) {
+    params.set("market", market);
+  }
+
+  return request<IndustrySummary[]>(
+    `/api/industries?${params}`,
+    undefined,
+    false,
+  );
 }
 
 export function submitOrder(
@@ -349,9 +371,10 @@ async function request<T>(
     ...init,
     headers,
   });
-  const payload = (await response.json()) as
-    | ApiEnvelope<T>
-    | { code?: string; message?: string };
+  const payload = (await response.json().catch(() => ({
+    code: "INVALID_RESPONSE",
+    message: `请求失败（${response.status}）`,
+  }))) as ApiEnvelope<T> | { code?: string; message?: string };
 
   if (!response.ok || !("data" in payload)) {
     const error = new ApiClientError(

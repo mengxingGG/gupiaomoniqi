@@ -79,6 +79,9 @@ export interface LLMTradingServiceStatus {
   modelId: string;
   agentCount: number;
   runningRequests: number;
+  completedRequests: number;
+  lastRequestLatencyMs: number | null;
+  averageRequestLatencyMs: number | null;
   providerFailures: number;
   lastSuccessAt: string | null;
   lastError: string | null;
@@ -91,6 +94,9 @@ export class LLMTradingService {
   #providerFailures = 0;
   #circuitOpenUntilMs = 0;
   #runningRequests = 0;
+  #completedRequests = 0;
+  #totalRequestLatencyMs = 0;
+  #lastRequestLatencyMs: number | null = null;
   #lastSuccessAt: string | null = null;
   #lastError: string | null = null;
   #populationReady = false;
@@ -135,6 +141,12 @@ export class LLMTradingService {
       modelId: this.config.modelId,
       agentCount: this.#personas.length,
       runningRequests: this.#runningRequests,
+      completedRequests: this.#completedRequests,
+      lastRequestLatencyMs: this.#lastRequestLatencyMs,
+      averageRequestLatencyMs:
+        this.#completedRequests === 0
+          ? null
+          : Math.round(this.#totalRequestLatencyMs / this.#completedRequests),
       providerFailures: this.#providerFailures,
       lastSuccessAt: this.#lastSuccessAt,
       lastError: this.#lastError,
@@ -220,11 +232,19 @@ export class LLMTradingService {
     try {
       const prompt = buildLLMDecisionPrompt(persona, context, this.config.contextWindow);
       this.#runningRequests += 1;
+      const requestStartedAt = performance.now();
       let rawDecision: unknown;
       try {
         rawDecision = await this.client.requestDecision(prompt, signal);
       } finally {
         this.#runningRequests -= 1;
+        const latencyMs = Math.max(
+          0,
+          Math.round(performance.now() - requestStartedAt),
+        );
+        this.#completedRequests += 1;
+        this.#totalRequestLatencyMs += latencyMs;
+        this.#lastRequestLatencyMs = latencyMs;
       }
       const decision = parseLLMTradeDecision(rawDecision, allowedIds, persona);
 
@@ -238,7 +258,11 @@ export class LLMTradingService {
       const execution = await this.port.executeDecision(agent, persona, context, decision);
       const completion: LLMAgentRunCompletion = {
         completedAt: this.clock().toISOString(),
-        nextActionAt: this.#nextNormalActionAt(),
+        nextActionAt: this.#nextNormalActionAt(
+          execution.state === "HOLD"
+            ? holdIntervalMultiplier(context)
+            : 1,
+        ),
         state: execution.state,
         modelId: this.config.modelId,
         decision,
@@ -291,10 +315,13 @@ export class LLMTradingService {
     return "ERROR";
   }
 
-  #nextNormalActionAt(): string {
+  #nextNormalActionAt(intervalMultiplier: number): string {
     const jitter = 0.85 + this.random() * 0.3;
     return new Date(
-      this.clock().getTime() + Math.round(this.config.decisionIntervalMs * jitter),
+      this.clock().getTime() +
+        Math.round(
+          this.config.decisionIntervalMs * jitter * intervalMultiplier,
+        ),
     ).toISOString();
   }
 
@@ -307,6 +334,20 @@ export class LLMTradingService {
     this.#circuitOpenUntilMs = now.getTime() + backoffMs;
     this.#lastError = detail.slice(0, 500);
   }
+}
+
+function holdIntervalMultiplier(context: LLMTradingContext): 1 | 2 | 4 {
+  let consecutiveHolds = 1;
+  for (let index = context.recentActivity.length - 1; index >= 0; index -= 1) {
+    if (context.recentActivity[index]?.result !== "HOLD") {
+      break;
+    }
+    consecutiveHolds += 1;
+  }
+  if (consecutiveHolds >= 3) {
+    return 4;
+  }
+  return consecutiveHolds === 2 ? 2 : 1;
 }
 
 function emptyRound(circuitOpenUntil: string | null): LLMTradingRoundResult {

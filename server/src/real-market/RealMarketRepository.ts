@@ -6,6 +6,7 @@ import type {
   Quote,
   StockMarket,
 } from "@gupiaomoniqi/shared";
+import { UNKNOWN_INDUSTRY } from "@gupiaomoniqi/shared";
 import type { PGlite } from "@electric-sql/pglite";
 import type {
   ProviderCandle,
@@ -66,6 +67,7 @@ const MARKET_DAY_FORMATTERS: Record<
 
 export interface RealMarketListingFilter {
   market?: StockMarket;
+  industry?: string;
   search?: string;
   page: number;
   pageSize: number;
@@ -169,11 +171,16 @@ export class RealMarketRepository {
           instrument.isActive &&
           this.#quotes.has(instrument.id) &&
           (!filter.market || instrument.market === filter.market) &&
+          (!filter.industry ||
+            normalizeIndustry(instrument.industry) === filter.industry) &&
           (!filter.instrumentIds ||
             filter.instrumentIds.has(instrument.id)) &&
           (!query ||
             instrument.symbol.toLowerCase().includes(query) ||
             instrument.name
+              .toLocaleLowerCase("zh-CN")
+              .includes(query) ||
+            normalizeIndustry(instrument.industry)
               .toLocaleLowerCase("zh-CN")
               .includes(query)),
       )
@@ -824,7 +831,7 @@ function toPublicInstrument(
     sourceCurrency: instrument.sourceCurrency,
     quoteCurrency: instrument.quoteCurrency,
     type: "STOCK_REAL",
-    industry: instrument.industry,
+    industry: normalizeIndustry(instrument.industry),
     isTradable: instrument.isTradable,
     lotSize: instrument.lotSize,
     settlementCycle: instrument.settlementCycle,
@@ -947,6 +954,15 @@ function marketDayBucket(
       .map((part) => [part.type, part.value]),
   );
   return `${parts.year}-${parts.month}-${parts.day}T00:00:00.000Z`;
+}
+
+function normalizeIndustry(industry: string): string {
+  const normalized = industry.trim();
+  return ["", "-", "--", "N/A", "NA", "NONE", "NULL", "UNKNOWN", "未知"].includes(
+    normalized.toLocaleUpperCase("en-US"),
+  )
+    ? UNKNOWN_INDUSTRY
+    : normalized;
 }
 
 function createMarketDayFormatter(

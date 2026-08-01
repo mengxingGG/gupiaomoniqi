@@ -3,10 +3,12 @@ package com.mengxinggg.gupiaomoniqi.data
 import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
+import com.mengxinggg.gupiaomoniqi.model.MarketSort
 import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
 import com.mengxinggg.gupiaomoniqi.model.OrderMode
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
 import com.mengxinggg.gupiaomoniqi.model.TradeSide
+import com.mengxinggg.gupiaomoniqi.model.SortOrder
 import java.io.IOException
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -234,9 +236,12 @@ class ApiClientContractTest {
             MarketQuery(
                 mode = MarketMode.REAL,
                 market = Market.US,
+                industry = "Consumer Tech",
                 search = "Apple & Co",
                 page = 3,
                 pageSize = 25,
+                sortBy = MarketSort.CHANGE_PERCENT,
+                sortOrder = SortOrder.ASC,
             ),
         )
 
@@ -245,11 +250,37 @@ class ApiClientContractTest {
         assertEquals(
             "$TEST_BASE_URL/api/market" +
                 "?mode=REAL&page=3&pageSize=25&market=US" +
-                "&search=Apple%20%26%20Co",
+                "&industry=Consumer%20Tech&search=Apple%20%26%20Co" +
+                "&sortBy=CHANGE_PERCENT&sortOrder=ASC",
             request.url,
         )
         assertFalse(request.headers.containsKey("Authorization"))
         assertNull(request.body)
+    }
+
+    @Test
+    fun `industry list is public and scoped to mode and market`() {
+        lateinit var recorded: HttpRequest
+        val client = ApiClient(
+            InMemoryTokenStore("secret-token", TEST_BASE_URL),
+        ) { request ->
+            recorded = request
+            HttpResponse(
+                200,
+                """{"data":[{"industry":"银行","count":42}]}""",
+            )
+        }
+
+        val result = client.industries(MarketMode.VIRTUAL, Market.CN)
+
+        assertEquals("GET", recorded.method)
+        assertEquals(
+            "$TEST_BASE_URL/api/industries?mode=VIRTUAL&market=CN",
+            recorded.url,
+        )
+        assertFalse(recorded.headers.containsKey("Authorization"))
+        assertEquals("银行", result.single().industry)
+        assertEquals(42, result.single().count)
     }
 
     @Test

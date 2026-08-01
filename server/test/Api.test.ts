@@ -118,6 +118,49 @@ describe("HTTP API", () => {
     expect(healthResponse.json().data.loadControl).toBeDefined();
   });
 
+  it("行情支持行业目录、行业筛选且筛选发生在分页之前", async () => {
+    const { repository } = await createTestHarness({
+      registerAccount: false,
+    });
+    context = await createApplication({ repository });
+
+    const directory = await context.app.inject({
+      method: "GET",
+      url: "/api/industries?mode=VIRTUAL",
+    });
+    const cnDirectory = await context.app.inject({
+      method: "GET",
+      url: "/api/industries?mode=VIRTUAL&market=CN",
+    });
+    const filtered = await context.app.inject({
+      method: "GET",
+      url: "/api/market?mode=VIRTUAL&market=US&industry=%E7%A7%91%E6%8A%80&page=1&pageSize=1",
+    });
+    const searched = await context.app.inject({
+      method: "GET",
+      url: "/api/market?mode=VIRTUAL&search=%E7%A7%91%E6%8A%80&pageSize=100",
+    });
+
+    expect(directory.statusCode).toBe(200);
+    expect(directory.json().data).toEqual(
+      expect.arrayContaining([
+        { industry: "白酒", count: 1 },
+        { industry: "互联网", count: 1 },
+        { industry: "科技", count: 1 },
+        { industry: "银行", count: 1 },
+      ]),
+    );
+    expect(cnDirectory.json().data).toEqual([
+      { industry: "白酒", count: 1 },
+    ]);
+    expect(filtered.json().data).toMatchObject({ total: 1, page: 1, pageSize: 1 });
+    expect(filtered.json().data.items[0].instrument).toMatchObject({
+      symbol: "AAPL",
+      industry: "科技",
+    });
+    expect(searched.json().data.total).toBe(1);
+  });
+
   it("注册后获得 100 万美元并通过统一账户完成交易", async () => {
     const { repository } = await createTestHarness({
       registerAccount: false,

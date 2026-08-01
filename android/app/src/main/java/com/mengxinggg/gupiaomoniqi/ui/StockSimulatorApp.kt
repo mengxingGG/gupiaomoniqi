@@ -28,6 +28,7 @@ import com.mengxinggg.gupiaomoniqi.ui.screens.AuthScreen
 import com.mengxinggg.gupiaomoniqi.ui.screens.DetailScreen
 import com.mengxinggg.gupiaomoniqi.ui.screens.DetailTradeActions
 import com.mengxinggg.gupiaomoniqi.ui.screens.MarketScreen
+import com.mengxinggg.gupiaomoniqi.ui.screens.OrdersScreen
 import com.mengxinggg.gupiaomoniqi.ui.screens.WatchlistScreen
 import com.mengxinggg.gupiaomoniqi.ui.theme.StockSimulatorTheme
 import com.mengxinggg.gupiaomoniqi.update.ApkInstaller
@@ -196,6 +197,8 @@ fun StockSimulatorApp() {
                                 state = state,
                                 onSearchChange = viewModel::setSearchQuery,
                                 onFilterChange = viewModel::setMarketFilter,
+                                onIndustryChange = viewModel::setIndustryFilter,
+                                onChangeSort = viewModel::cycleChangeSort,
                                 onRefresh = viewModel::refreshMarket,
                                 onLoadMore = viewModel::loadMoreMarket,
                                 onOpenStock = viewModel::openStock,
@@ -213,6 +216,16 @@ fun StockSimulatorApp() {
                                 modifier = Modifier.padding(innerPadding),
                             )
                         }
+                        MainTab.ORDERS -> {
+                            OrdersScreen(
+                                state = state,
+                                onLogin = viewModel::openAuth,
+                                onRefresh = viewModel::refreshAccount,
+                                onOpenStock = viewModel::openStock,
+                                onCancelOrder = viewModel::cancelOrder,
+                                modifier = Modifier.padding(innerPadding),
+                            )
+                        }
                         MainTab.ASSETS -> {
                             AssetsScreen(
                                 state = state,
@@ -222,7 +235,6 @@ fun StockSimulatorApp() {
                                 onOpenStock = viewModel::openStock,
                                 onCheckIn = viewModel::claimCheckIn,
                                 onRedeemGift = viewModel::redeemGiftCode,
-                                onCancelOrder = viewModel::cancelOrder,
                                 modifier = Modifier.padding(innerPadding),
                             )
                         }

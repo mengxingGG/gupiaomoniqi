@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelOrder,
+  fetchIndustries,
+  fetchMarket,
   fetchOrders,
   submitOrder,
 } from "../src/api.js";
@@ -70,11 +72,46 @@ describe("订单 API", () => {
     );
   });
 
+  it("旧服务器返回非 JSON 404 时仍保留状态码供页面降级", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("Not Found", { status: 404 }),
+    );
+
+    await expect(fetchOrders("VIRTUAL")).rejects.toMatchObject({
+      status: 404,
+      code: "INVALID_RESPONSE",
+    });
+  });
+
   it("撤单路径会安全编码订单编号", async () => {
     await cancelOrder("order/with space", "REAL");
 
     const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(path).toBe("/api/orders/order%2Fwith%20space?mode=REAL");
     expect(init.method).toBe("DELETE");
+  });
+
+  it("按市场读取行业汇总", async () => {
+    await fetchIndustries("REAL", "HK");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/industries?mode=REAL&market=HK",
+    );
+  });
+
+  it("行情请求携带精确行业和涨跌幅排序", async () => {
+    await fetchMarket({
+      mode: "VIRTUAL",
+      market: "CN",
+      industry: "银行",
+      page: 2,
+      pageSize: 40,
+      sortBy: "CHANGE_PERCENT",
+      sortOrder: "ASC",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/market?mode=VIRTUAL&page=2&pageSize=40&market=CN&industry=%E9%93%B6%E8%A1%8C&sortBy=CHANGE_PERCENT&sortOrder=ASC",
+    );
   });
 });

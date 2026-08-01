@@ -12,6 +12,7 @@ import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
 import com.mengxinggg.gupiaomoniqi.model.Instrument
 import com.mengxinggg.gupiaomoniqi.model.InstrumentType
+import com.mengxinggg.gupiaomoniqi.model.IndustryCount
 import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
@@ -119,6 +120,14 @@ object JsonCodec {
         page = json.getInt("page"),
         pageSize = json.getInt("pageSize"),
     )
+
+    fun industryCounts(json: JSONArray): List<IndustryCount> =
+        json.mapObjects { item ->
+            IndustryCount(
+                industry = item.getString("industry"),
+                count = item.getInt("count"),
+            )
+        }
 
     fun position(json: JSONObject): Position = Position(
         instrumentId = json.getString("instrumentId"),

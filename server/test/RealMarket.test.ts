@@ -453,7 +453,8 @@ describe("真实行情完整模块", () => {
     await provider.fetchHistory(instrument, "INTRADAY");
 
     const [dayUrl, monthUrl, yearUrl, intradayUrl] = requestedUrls;
-    expect(dayUrl?.searchParams.get("beg")).toBe("20260629");
+    expect(dayUrl?.searchParams.get("beg")).toBe("20260130");
+    expect(dayUrl?.searchParams.get("lmt")).toBe("160");
     expect(dayUrl?.searchParams.get("klt")).toBe("101");
     expect(monthUrl?.searchParams.get("klt")).toBe("103");
     expect(yearUrl?.searchParams.get("klt")).toBe("106");
@@ -1023,7 +1024,7 @@ describe("真实行情完整模块", () => {
     const year = await service.getChart(instrument.id, "YEAR");
     const intraday = await service.getChart(instrument.id, "INTRADAY");
 
-    expect(day?.candles).toHaveLength(30);
+    expect(day?.candles).toHaveLength(120);
     expect(month?.candles).toHaveLength(60);
     expect(year?.candles).toHaveLength(20);
     expect(intraday?.candles).toHaveLength(390);
@@ -1442,6 +1443,57 @@ describe("真实行情完整模块", () => {
       ).toEqual(["AAPL", "TSLA", "MSFT"]);
     } finally {
       await context.app.close();
+    }
+  });
+
+  it("真实盘行业筛选兼容旧数据中的空行业", async () => {
+    const virtual = await createTestHarness({ registerAccount: false });
+    const { repository: realRepository } = await createRealRepository();
+    const receivedAt = new Date().toISOString();
+    const known = snapshotWithChange("real-us-known", "KNOWN", 1, 1);
+    known.instrument.industry = "软件";
+    const legacy = snapshotWithChange("real-us-legacy", "LEGACY", 2, 2);
+    legacy.instrument.industry = "-";
+    await realRepository.upsertProviderPage(
+      {
+        market: "US",
+        page: 1,
+        pageSize: 100,
+        providerTotal: 2,
+        receivedAt,
+        durationMs: 10,
+        items: [known, legacy],
+      },
+      "industry-seed",
+    );
+    const application = await createApplication({
+      repository: virtual.repository,
+      realRepository,
+      realSyncEnabled: false,
+      aiEnabled: false,
+    });
+
+    try {
+      const directory = await application.app.inject({
+        method: "GET",
+        url: "/api/industries?mode=REAL&market=US",
+      });
+      const filtered = await application.app.inject({
+        method: "GET",
+        url: "/api/market?mode=REAL&industry=%E6%9C%AA%E5%88%86%E7%B1%BB&pageSize=100",
+      });
+
+      expect(directory.json().data).toEqual([
+        { industry: "软件", count: 1 },
+        { industry: "未分类", count: 1 },
+      ]);
+      expect(filtered.json().data.total).toBe(1);
+      expect(filtered.json().data.items[0].instrument).toMatchObject({
+        symbol: "LEGACY",
+        industry: "未分类",
+      });
+    } finally {
+      await application.app.close();
     }
   });
 });

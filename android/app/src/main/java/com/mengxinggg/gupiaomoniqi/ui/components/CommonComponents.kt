@@ -4,10 +4,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,15 +28,22 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.mengxinggg.gupiaomoniqi.ui.AccountUi
 import com.mengxinggg.gupiaomoniqi.ui.MainTab
 import com.mengxinggg.gupiaomoniqi.ui.StockUi
@@ -62,78 +71,58 @@ fun AppTopControls(
         modifier = modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(28.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Surface(
-                modifier = Modifier.size(36.dp),
-                shape = RoundedCornerShape(11.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        "股",
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontWeight = FontWeight.Black,
-                    )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "股票模拟器",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    if (mode == UiMarketMode.REAL) {
-                        "真实行情 · 模拟交易"
-                    } else {
-                        "模拟行情 · 模拟交易"
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
-            TextButton(onClick = onAccountClick) {
-                Text(account?.displayName ?: "登录")
-            }
-            TextButton(
-                onClick = onSettingsClick,
+            Text(
+                text = account?.displayName ?: "登录",
                 modifier = Modifier
-                    .size(40.dp)
+                    .weight(1f)
+                    .clickable(role = Role.Button, onClick = onAccountClick)
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.End,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 10.sp,
+                    lineHeight = 12.sp,
+                ),
+            )
+            Spacer(Modifier.width(2.dp))
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
                     .semantics {
                         contentDescription = if (hasAppUpdate) {
                             "设置，有新版本"
                         } else {
                             "设置"
                         }
-                    },
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-            ) {
-                Box(
-                    modifier = Modifier.size(32.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "⚙",
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    if (hasAppUpdate) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(8.dp)
-                                .background(
-                                    color = MaterialTheme.colorScheme.error,
-                                    shape = CircleShape,
-                                ),
-                        )
                     }
+                    .clickable(role = Role.Button, onClick = onSettingsClick),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "⚙",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                if (hasAppUpdate) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .size(7.dp)
+                            .background(
+                                color = MaterialTheme.colorScheme.error,
+                                shape = CircleShape,
+                            ),
+                    )
                 }
             }
         }
@@ -141,7 +130,7 @@ fun AppTopControls(
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             SegmentedChoice(
                 modifier = Modifier.weight(1f),
@@ -153,7 +142,7 @@ fun AppTopControls(
                 onSelected = onModeChange,
             )
             SegmentedChoice(
-                modifier = Modifier.width(116.dp),
+                modifier = Modifier.width(104.dp),
                 choices = listOf(
                     UiDisplayCurrency.CNY to "CNY",
                     UiDisplayCurrency.USD to "USD",
@@ -162,6 +151,27 @@ fun AppTopControls(
                 onSelected = onCurrencyChange,
             )
         }
+    }
+}
+
+@OptIn(ExperimentalMaterialApi::class)
+@Composable
+fun PullToRefreshContainer(
+    refreshing: Boolean,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val refreshState = rememberPullRefreshState(refreshing, onRefresh)
+    Box(modifier = modifier.pullRefresh(refreshState)) {
+        content()
+        PullRefreshIndicator(
+            refreshing = refreshing,
+            state = refreshState,
+            modifier = Modifier.align(Alignment.TopCenter),
+            backgroundColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.primary,
+        )
     }
 }
 
@@ -174,10 +184,10 @@ private fun <T> SegmentedChoice(
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
-        Row(modifier = Modifier.padding(3.dp)) {
+        Row(modifier = Modifier.padding(2.dp)) {
             choices.forEach { (value, label) ->
                 val active = selected == value
                 Surface(
@@ -190,7 +200,7 @@ private fun <T> SegmentedChoice(
                             role = Role.RadioButton,
                             onClick = { onSelected(value) },
                         ),
-                    shape = RoundedCornerShape(9.dp),
+                    shape = RoundedCornerShape(8.dp),
                     color = if (active) {
                         MaterialTheme.colorScheme.surface
                     } else {
@@ -200,14 +210,14 @@ private fun <T> SegmentedChoice(
                 ) {
                     Text(
                         text = label,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 5.dp),
                         color = if (active) {
                             MaterialTheme.colorScheme.primary
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
                         fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                     )
                 }
             }
@@ -230,6 +240,7 @@ fun MainBottomBar(
                         when (tab) {
                             MainTab.MARKET -> "行"
                             MainTab.WATCHLIST -> "★"
+                            MainTab.ORDERS -> "单"
                             MainTab.ASSETS -> "资"
                         },
                         fontWeight = FontWeight.Bold,
@@ -288,7 +299,11 @@ fun StockCard(
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "${stock.symbol} · ${marketLabel(stock.market)}",
+                    listOfNotNull(
+                        stock.symbol,
+                        marketLabel(stock.market),
+                        stock.industry.trim().takeIf(String::isNotEmpty),
+                    ).joinToString(" · "),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

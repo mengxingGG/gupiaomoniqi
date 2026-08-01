@@ -220,6 +220,7 @@ class JsonCodecTest {
             chart.candles.single().source,
         )
         assertFalse(chart.candles.single().isPartial)
+        assertEquals(212.1, chart.candles.single().averagePrice!!, 0.0001)
         assertNull(chart.coverageStart)
         assertEquals(1_200L, orderBook.asks.single().quantity)
         assertTrue(orderBook.available == true)

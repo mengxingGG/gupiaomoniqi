@@ -6,6 +6,7 @@ import com.mengxinggg.gupiaomoniqi.model.ChartRange
 import com.mengxinggg.gupiaomoniqi.model.ChartSeries
 import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
+import com.mengxinggg.gupiaomoniqi.model.IndustryCount
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
@@ -382,6 +383,9 @@ class ApiClient(
             "pageSize" to query.pageSize.toString(),
         )
         query.market?.let { params["market"] = it.name }
+        query.industry?.trim()?.takeIf(String::isNotEmpty)?.let {
+            params["industry"] = it
+        }
         query.search?.trim()?.takeIf(String::isNotEmpty)?.let {
             params["search"] = it
         }
@@ -397,6 +401,20 @@ class ApiClient(
             query = params,
             includeAuth = query.watchlistOnly,
             decode = JsonCodec::marketPage,
+        )
+    }
+
+    fun industries(
+        mode: MarketMode,
+        market: com.mengxinggg.gupiaomoniqi.model.Market?,
+    ): List<IndustryCount> {
+        val query = linkedMapOf("mode" to mode.name)
+        market?.let { query["market"] = it.name }
+        return requestArray(
+            path = "/api/industries",
+            query = query,
+            includeAuth = false,
+            decode = JsonCodec::industryCounts,
         )
     }
 
