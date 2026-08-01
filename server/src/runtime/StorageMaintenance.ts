@@ -32,15 +32,17 @@ export async function runStorageMaintenance(input: {
   virtualClient?: PGlite;
   realClient?: PGlite;
   now?: Date;
+  deep?: boolean;
 }): Promise<StorageMaintenanceResult> {
   const now = input.now ?? new Date();
+  const deep = input.deep ?? false;
   const result: StorageMaintenanceResult = {};
 
   if (input.virtualClient) {
-    result.virtual = await pruneVirtualStorage(input.virtualClient, now);
+    result.virtual = await pruneVirtualStorage(input.virtualClient, now, deep);
   }
   if (input.realClient) {
-    result.real = await pruneRealStorage(input.realClient, now);
+    result.real = await pruneRealStorage(input.realClient, now, deep);
   }
 
   return result;
@@ -49,6 +51,7 @@ export async function runStorageMaintenance(input: {
 async function pruneVirtualStorage(
   client: PGlite,
   now: Date,
+  deep = false,
 ): Promise<NonNullable<StorageMaintenanceResult["virtual"]>> {
   const result = {
     deletedExpiredSessions: await deleteCount(
@@ -98,7 +101,7 @@ async function pruneVirtualStorage(
     vacuumed: false,
     checkpointed: false,
   };
-  const compacted = await compactDatabase(client);
+  const compacted = await compactDatabase(client, deep);
   result.vacuumed = compacted.vacuumed;
   result.checkpointed = compacted.checkpointed;
   return result;
@@ -107,6 +110,7 @@ async function pruneVirtualStorage(
 async function pruneRealStorage(
   client: PGlite,
   now: Date,
+  deep = false,
 ): Promise<NonNullable<StorageMaintenanceResult["real"]>> {
   const result = {
     deletedMinuteCandles: await trimRealCandles(
@@ -136,7 +140,7 @@ async function pruneRealStorage(
     vacuumed: false,
     checkpointed: false,
   };
-  const compacted = await compactDatabase(client);
+  const compacted = await compactDatabase(client, deep);
   result.vacuumed = compacted.vacuumed;
   result.checkpointed = compacted.checkpointed;
   return result;
@@ -183,7 +187,7 @@ async function deleteCount(
   return result.rows.length;
 }
 
-async function compactDatabase(client: PGlite): Promise<{
+async function compactDatabase(client: PGlite, deep = false): Promise<{
   vacuumed: boolean;
   checkpointed: boolean;
 }> {
@@ -191,10 +195,20 @@ async function compactDatabase(client: PGlite): Promise<{
   let checkpointed = false;
 
   try {
-    await client.exec("VACUUM");
+    await client.exec(deep ? "VACUUM FULL" : "VACUUM");
     vacuumed = true;
   } catch {
-    vacuumed = false;
+    // VACUUM FULL can fail if disk space is low; fall back to plain VACUUM
+    if (deep) {
+      try {
+        await client.exec("VACUUM");
+        vacuumed = true;
+      } catch {
+        vacuumed = false;
+      }
+    } else {
+      vacuumed = false;
+    }
   }
 
   try {

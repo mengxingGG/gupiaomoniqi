@@ -87,6 +87,7 @@ import {
 } from "./services/AccountFeatureStore.js";
 import { RewardService } from "./services/RewardService.js";
 import { runStorageMaintenance } from "./runtime/StorageMaintenance.js";
+import type { PGlite } from "@electric-sql/pglite";
 import { SystemLoadController } from "./runtime/SystemLoadController.js";
 import { ensureVirtualMarketUniverse } from "./startup/marketSeedBootstrap.js";
 import { VirtualMarketEngine } from "./virtual-market/VirtualMarketEngine.js";
@@ -423,6 +424,51 @@ export async function createApplication(
     realTradingService,
     clock,
   );
+  // Periodic storage maintenance
+  const virtualClient: PGlite | undefined = primaryConnection?.client;
+  const realClient: PGlite | undefined = ownedRealConnection?.client;
+
+  const MAINTENANCE_QUICK_MS = 60 * 60 * 1000;
+  const MAINTENANCE_DEEP_MS = 4 * 60 * 60 * 1000;
+  let quickTimer: ReturnType<typeof setInterval> | null = null;
+  let deepTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function runQuickMaintenance() {
+    try {
+      const result = await runStorageMaintenance({
+        virtualClient,
+        realClient,
+        now: clock(),
+        deep: false,
+      });
+      if ((result.virtual?.deletedOldMinuteCandles ?? 0) > 0) {
+        startupLog(`maintenance: deleted ${result.virtual?.deletedOldMinuteCandles} old minute candles`);
+      }
+    } catch (err: any) {
+      startupLog(`maintenance quick failed: ${err?.message ?? err}`);
+    }
+  }
+
+  async function runDeepMaintenance() {
+    try {
+      startupLog("maintenance: starting deep compaction (VACUUM FULL)...");
+      const result = await runStorageMaintenance({
+        virtualClient,
+        realClient,
+        now: clock(),
+        deep: true,
+      });
+      startupLog(`maintenance deep: virtual vacuumed=${result.virtual?.vacuumed}, real vacuumed=${result.real?.vacuumed}`);
+    } catch (err: any) {
+      startupLog(`maintenance deep failed: ${err?.message ?? err}`);
+    }
+  }
+
+  quickTimer = setInterval(runQuickMaintenance, MAINTENANCE_QUICK_MS);
+  quickTimer.unref();
+  deepTimer = setInterval(runDeepMaintenance, MAINTENANCE_DEEP_MS);
+  deepTimer.unref();
+
   const authLimiter = new WindowRateLimiter();
   const app = Fastify({
     logger: options.logger ?? false,
@@ -1284,6 +1330,8 @@ export async function createApplication(
   }
 
   app.addHook("onClose", async () => {
+    if (quickTimer) { clearInterval(quickTimer); quickTimer = null; }
+    if (deepTimer) { clearInterval(deepTimer); deepTimer = null; }
     loadController.stop();
     runtime.stop();
     aiRuntime.stop();
