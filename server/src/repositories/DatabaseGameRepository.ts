@@ -4,6 +4,7 @@ import type {
   CandleSource,
   DisplayCurrency,
   InstrumentType,
+  OrderStatus,
   Quote,
   QuoteCurrency,
   SettlementCycle,
@@ -16,16 +17,15 @@ import { randomUUID } from "node:crypto";
 import {
   and,
   eq,
-  inArray,
-  isNull,
-  lte,
   sql,
 } from "drizzle-orm";
 import type { DatabaseConnection } from "../db/client.js";
 import {
   accounts,
+  aiTraderDecisions,
   aiTraders,
   candles as candleTable,
+  orders as orderTable,
   positionSettlementLots,
   portfolios,
   positions,
@@ -34,6 +34,7 @@ import {
   transactions as transactionTable,
 } from "../db/schema.js";
 import type {
+  AITraderDecisionRecord,
   AITraderRecord,
   AccountRecord,
   CandleRecord,
@@ -41,6 +42,8 @@ import type {
   CreateAccountCommit,
   GameRepository,
   InstrumentRecord,
+  OrderRecord,
+  OrderStateCommit,
   PortfolioRecord,
   PositionRecord,
   SessionRecord,
@@ -85,8 +88,13 @@ export class DatabaseGameRepository implements GameRepository {
   readonly #portfolioIdsByAccount = new Map<string, string>();
   readonly #positions = new Map<string, Map<string, PositionRecord>>();
   readonly #transactions = new Map<string, Transaction[]>();
+  readonly #orders = new Map<string, OrderRecord>();
   readonly #aiTraders = new Map<string, AITraderRecord>();
   readonly #aiTraderIdsByPortfolio = new Map<string, string>();
+  readonly #aiTraderDecisions = new Map<
+    string,
+    AITraderDecisionRecord[]
+  >();
 
   private constructor(private readonly connection: DatabaseConnection) {}
 
@@ -413,12 +421,175 @@ export class DatabaseGameRepository implements GameRepository {
     return transaction ? structuredClone(transaction) : undefined;
   }
 
-  async commitTrade(commit: TradeCommit): Promise<void> {
+  listOrders(
+    portfolioId: string,
+    status?: OrderStatus,
+  ): OrderRecord[] {
+    return [...this.#orders.values()]
+      .filter(
+        (order) =>
+          order.portfolioId === portfolioId &&
+          (!status || order.status === status),
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map((order) => structuredClone(order));
+  }
+
+  listOpenOrders(instrumentIds?: string[]): OrderRecord[] {
+    const allowed = instrumentIds ? new Set(instrumentIds) : null;
+    return [...this.#orders.values()]
+      .filter(
+        (order) =>
+          order.status === "OPEN" &&
+          (!allowed || allowed.has(order.instrumentId)),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((order) => structuredClone(order));
+  }
+
+  getOrderById(orderId: string): OrderRecord | undefined {
+    const order = this.#orders.get(orderId);
+    return order ? structuredClone(order) : undefined;
+  }
+
+  getOrderByIdempotencyKey(
+    portfolioId: string,
+    idempotencyKey: string,
+  ): OrderRecord | undefined {
+    const order = [...this.#orders.values()].find(
+      (candidate) =>
+        candidate.portfolioId === portfolioId &&
+        candidate.idempotencyKey === idempotencyKey,
+    );
+    return order ? structuredClone(order) : undefined;
+  }
+
+  async commitOrderState(commit: OrderStateCommit): Promise<void> {
+    let committedCash:
+      | { availableCashUsd: number; frozenCashUsd: number }
+      | undefined;
     await this.connection.db.transaction(async (transaction) => {
-      await transaction
+      const updated = await transaction
         .update(portfolios)
-        .set({ availableCashUsd: commit.availableCashUsd })
-        .where(eq(portfolios.id, commit.portfolioId));
+        .set({
+          availableCashUsd:
+            commit.availableCashDeltaUsd === undefined
+              ? commit.availableCashUsd
+              : sql`${portfolios.availableCashUsd} + ${commit.availableCashDeltaUsd}`,
+          frozenCashUsd:
+            commit.frozenCashDeltaUsd === undefined
+              ? commit.frozenCashUsd
+              : sql`${portfolios.frozenCashUsd} + ${commit.frozenCashDeltaUsd}`,
+        })
+        .where(eq(portfolios.id, commit.portfolioId))
+        .returning({
+          availableCashUsd: portfolios.availableCashUsd,
+          frozenCashUsd: portfolios.frozenCashUsd,
+        });
+      committedCash = updated[0];
+      if (!committedCash) {
+        throw new Error("PORTFOLIO_NOT_FOUND");
+      }
+
+      if (commit.position !== undefined) {
+        if (commit.position) {
+          await transaction
+            .insert(positions)
+            .values({
+              id: commit.position.id,
+              portfolioId: commit.portfolioId,
+              instrumentId: commit.position.instrumentId,
+              quantity: commit.position.quantity,
+              availableQuantity: commit.position.availableQuantity,
+              frozenQuantity: commit.position.frozenQuantity,
+              averageCost: commit.position.averageCostUsd,
+              averageCostUsd: commit.position.averageCostUsd,
+              updatedAt: new Date(commit.occurredAt),
+            })
+            .onConflictDoUpdate({
+              target: [positions.portfolioId, positions.instrumentId],
+              set: {
+                quantity: commit.position.quantity,
+                availableQuantity: commit.position.availableQuantity,
+                frozenQuantity: commit.position.frozenQuantity,
+                averageCost: commit.position.averageCostUsd,
+                averageCostUsd: commit.position.averageCostUsd,
+                updatedAt: new Date(commit.occurredAt),
+              },
+            });
+        } else {
+          await transaction
+            .delete(positions)
+            .where(
+              and(
+                eq(positions.portfolioId, commit.portfolioId),
+                eq(positions.instrumentId, commit.instrumentId),
+              ),
+            );
+        }
+      }
+
+      await transaction
+        .insert(orderTable)
+        .values(toOrderValues(commit.order))
+        .onConflictDoUpdate({
+          target: orderTable.id,
+          set: toOrderUpdateValues(commit.order),
+        });
+    });
+
+    const portfolio = this.#requirePortfolio(commit.portfolioId);
+    portfolio.availableCashUsd = committedCash!.availableCashUsd;
+    portfolio.frozenCashUsd = committedCash!.frozenCashUsd;
+    if (commit.position !== undefined) {
+      const portfolioPositions =
+        this.#positions.get(commit.portfolioId) ??
+        new Map<string, PositionRecord>();
+      this.#positions.set(commit.portfolioId, portfolioPositions);
+      if (commit.position) {
+        portfolioPositions.set(
+          commit.position.instrumentId,
+          structuredClone(commit.position),
+        );
+      } else {
+        portfolioPositions.delete(commit.instrumentId);
+      }
+    }
+    this.#orders.set(commit.order.id, structuredClone(commit.order));
+  }
+
+  async commitTrade(commit: TradeCommit): Promise<void> {
+    let committedCash:
+      | { availableCashUsd: number; frozenCashUsd: number }
+      | undefined;
+    await this.connection.db.transaction(async (transaction) => {
+      const portfolioUpdate: {
+        availableCashUsd: number | ReturnType<typeof sql>;
+        frozenCashUsd?: number | ReturnType<typeof sql>;
+      } = {
+        availableCashUsd:
+          commit.availableCashDeltaUsd === undefined
+            ? commit.availableCashUsd
+            : sql`${portfolios.availableCashUsd} + ${commit.availableCashDeltaUsd}`,
+      };
+      if (commit.frozenCashDeltaUsd !== undefined) {
+        portfolioUpdate.frozenCashUsd =
+          sql`${portfolios.frozenCashUsd} + ${commit.frozenCashDeltaUsd}`;
+      } else if (commit.frozenCashUsd !== undefined) {
+        portfolioUpdate.frozenCashUsd = commit.frozenCashUsd;
+      }
+      const updated = await transaction
+        .update(portfolios)
+        .set(portfolioUpdate)
+        .where(eq(portfolios.id, commit.portfolioId))
+        .returning({
+          availableCashUsd: portfolios.availableCashUsd,
+          frozenCashUsd: portfolios.frozenCashUsd,
+        });
+      committedCash = updated[0];
+      if (!committedCash) {
+        throw new Error("PORTFOLIO_NOT_FOUND");
+      }
 
       if (commit.position) {
         await transaction
@@ -499,10 +670,21 @@ export class DatabaseGameRepository implements GameRepository {
           createdAt: new Date(commit.occurredAt),
         });
       }
+
+      if (commit.order) {
+        await transaction
+          .insert(orderTable)
+          .values(toOrderValues(commit.order))
+          .onConflictDoUpdate({
+            target: orderTable.id,
+            set: toOrderUpdateValues(commit.order),
+          });
+      }
     });
 
     const portfolio = this.#requirePortfolio(commit.portfolioId);
-    portfolio.availableCashUsd = commit.availableCashUsd;
+    portfolio.availableCashUsd = committedCash!.availableCashUsd;
+    portfolio.frozenCashUsd = committedCash!.frozenCashUsd;
     const portfolioPositions =
       this.#positions.get(commit.portfolioId) ??
       new Map<string, PositionRecord>();
@@ -531,70 +713,58 @@ export class DatabaseGameRepository implements GameRepository {
       }
       this.#transactions.set(commit.portfolioId, portfolioTransactions);
     }
+    if (commit.order) {
+      this.#orders.set(commit.order.id, structuredClone(commit.order));
+    }
   }
 
   async settleDuePositions(at: string): Promise<SettlementResult[]> {
     const settledAt = new Date(at);
-    const dueLots = await this.connection.db
-      .select({
-        id: positionSettlementLots.id,
-        portfolioId: positionSettlementLots.portfolioId,
-        instrumentId: positionSettlementLots.instrumentId,
-        quantity: positionSettlementLots.quantity,
-      })
-      .from(positionSettlementLots)
-      .where(
-        and(
-          isNull(positionSettlementLots.settledAt),
-          lte(positionSettlementLots.unlockAt, settledAt),
-        ),
-      );
-
-    if (dueLots.length === 0) {
-      return [];
-    }
-
     const grouped = new Map<string, SettlementResult>();
-
-    for (const lot of dueLots) {
-      const key = `${lot.portfolioId}:${lot.instrumentId}`;
-      const current = grouped.get(key);
-      grouped.set(key, {
-        portfolioId: lot.portfolioId,
-        instrumentId: lot.instrumentId,
-        quantity: (current?.quantity ?? 0) + lot.quantity,
-      });
-    }
-
-    await this.connection.db.transaction(async (transaction) => {
-      for (const settlement of grouped.values()) {
-        await transaction
-          .update(positions)
-          .set({
-            availableQuantity: sql`LEAST(
-              ${positions.quantity} - ${positions.frozenQuantity},
-              ${positions.availableQuantity} + ${settlement.quantity}
-            )`,
-            updatedAt: settledAt,
-          })
-          .where(
-            and(
-              eq(positions.portfolioId, settlement.portfolioId),
-              eq(positions.instrumentId, settlement.instrumentId),
-            ),
-          );
+    await this.connection.client.transaction(async (transaction) => {
+      const claimed = await transaction.query<{
+        portfolio_id: string;
+        instrument_id: string;
+        quantity: number;
+      }>(
+        `UPDATE position_settlement_lots
+            SET settled_at = $1
+          WHERE settled_at IS NULL AND unlock_at <= $1
+        RETURNING portfolio_id, instrument_id, quantity`,
+        [settledAt],
+      );
+      for (const lot of claimed.rows) {
+        const key = `${lot.portfolio_id}:${lot.instrument_id}`;
+        const current = grouped.get(key);
+        grouped.set(key, {
+          portfolioId: lot.portfolio_id,
+          instrumentId: lot.instrument_id,
+          quantity: (current?.quantity ?? 0) + lot.quantity,
+        });
       }
 
-      await transaction
-        .update(positionSettlementLots)
-        .set({ settledAt })
-        .where(
-          inArray(
-            positionSettlementLots.id,
-            dueLots.map((lot) => lot.id),
-          ),
+      for (const settlement of grouped.values()) {
+        await transaction.query(
+          `UPDATE positions
+              SET available_quantity = LEAST(
+                    quantity - frozen_quantity,
+                    available_quantity + $3
+                  ),
+                  updated_at = $4
+            WHERE portfolio_id = $1 AND instrument_id = $2`,
+          [
+            settlement.portfolioId,
+            settlement.instrumentId,
+            settlement.quantity,
+            settledAt,
+          ],
         );
+      }
     });
+
+    if (grouped.size === 0) {
+      return [];
+    }
 
     for (const settlement of grouped.values()) {
       const position = this.#positions
@@ -713,6 +883,8 @@ export class DatabaseGameRepository implements GameRepository {
             riskLevel: trader.riskLevel,
             activityLevel: trader.activityLevel,
             preferredMarket: trader.preferredMarket,
+            traderKind: trader.traderKind ?? "RULE",
+            personaKey: trader.personaKey ?? null,
             isActive: trader.isActive,
             lastActionAt: trader.lastActionAt
               ? new Date(trader.lastActionAt)
@@ -768,6 +940,8 @@ export class DatabaseGameRepository implements GameRepository {
               riskLevel: trader.riskLevel,
               activityLevel: trader.activityLevel,
               preferredMarket: trader.preferredMarket,
+              traderKind: trader.traderKind ?? "RULE",
+              personaKey: trader.personaKey ?? null,
               isActive: trader.isActive,
               lastActionAt: trader.lastActionAt
                 ? new Date(trader.lastActionAt)
@@ -788,6 +962,8 @@ export class DatabaseGameRepository implements GameRepository {
               riskLevel: sql`excluded.risk_level`,
               activityLevel: sql`excluded.activity_level`,
               preferredMarket: sql`excluded.preferred_market`,
+              traderKind: sql`excluded.trader_kind`,
+              personaKey: sql`excluded.persona_key`,
               isActive: sql`excluded.is_active`,
               lastActionAt: sql`excluded.last_action_at`,
               nextActionAt: sql`excluded.next_action_at`,
@@ -802,6 +978,37 @@ export class DatabaseGameRepository implements GameRepository {
     for (const trader of traders) {
       this.#aiTraders.set(trader.id, structuredClone(trader));
     }
+  }
+
+  listAITraderDecisions(
+    traderId: string,
+    limit: number,
+  ): AITraderDecisionRecord[] {
+    return (this.#aiTraderDecisions.get(traderId) ?? [])
+      .slice(0, Math.max(0, limit))
+      .map((decision) => structuredClone(decision));
+  }
+
+  async appendAITraderDecision(
+    decision: AITraderDecisionRecord,
+  ): Promise<void> {
+    await this.connection.db.insert(aiTraderDecisions).values({
+      id: decision.id,
+      traderId: decision.traderId,
+      decidedAt: new Date(decision.decidedAt),
+      action: decision.action,
+      instrumentId: decision.instrumentId,
+      result: decision.result,
+      reason: decision.reason,
+      modelId: decision.modelId,
+      detail: decision.detail,
+    });
+    const decisions = this.#aiTraderDecisions.get(decision.traderId) ?? [];
+    decisions.unshift(structuredClone(decision));
+    if (decisions.length > 100) {
+      decisions.length = 100;
+    }
+    this.#aiTraderDecisions.set(decision.traderId, decisions);
   }
 
   async #load(): Promise<void> {
@@ -994,6 +1201,8 @@ export class DatabaseGameRepository implements GameRepository {
       risk_level: number;
       activity_level: number;
       preferred_market: StockMarket;
+      trader_kind: "RULE" | "LLM";
+      persona_key: string | null;
       is_active: boolean;
       last_action_at: Date | string | null;
       next_action_at: Date | string;
@@ -1003,7 +1212,8 @@ export class DatabaseGameRepository implements GameRepository {
       created_at: Date | string;
     }>(
       `SELECT id, portfolio_id, name, strategy, psychology,
-              risk_level, activity_level, preferred_market, is_active,
+              risk_level, activity_level, preferred_market,
+              trader_kind, persona_key, is_active,
               last_action_at, next_action_at, total_trades,
               win_count, loss_count, created_at
          FROM ai_traders`,
@@ -1019,6 +1229,8 @@ export class DatabaseGameRepository implements GameRepository {
         riskLevel: row.risk_level,
         activityLevel: row.activity_level,
         preferredMarket: row.preferred_market,
+        traderKind: row.trader_kind,
+        personaKey: row.persona_key,
         isActive: row.is_active,
         lastActionAt: row.last_action_at
           ? new Date(row.last_action_at).toISOString()
@@ -1034,6 +1246,42 @@ export class DatabaseGameRepository implements GameRepository {
         trader.portfolioId,
         trader.id,
       );
+    }
+
+    const decisionResult = await this.connection.client.query<{
+      id: string;
+      trader_id: string;
+      decided_at: Date | string;
+      action: string;
+      instrument_id: string | null;
+      result: string;
+      reason: string | null;
+      model_id: string;
+      detail: string | null;
+    }>(
+      `SELECT id, trader_id, decided_at, action, instrument_id,
+              result, reason, model_id, detail
+         FROM ai_trader_decisions
+        WHERE decided_at >= now() - interval '30 days'
+        ORDER BY decided_at DESC`,
+    );
+    for (const row of decisionResult.rows) {
+      const decisions = this.#aiTraderDecisions.get(row.trader_id) ?? [];
+      if (decisions.length >= 100) {
+        continue;
+      }
+      decisions.push({
+        id: row.id,
+        traderId: row.trader_id,
+        decidedAt: new Date(row.decided_at).toISOString(),
+        action: row.action,
+        instrumentId: row.instrument_id,
+        result: row.result,
+        reason: row.reason,
+        modelId: row.model_id,
+        detail: row.detail,
+      });
+      this.#aiTraderDecisions.set(row.trader_id, decisions);
     }
 
     const positionResult = await this.connection.client.query<{
@@ -1104,7 +1352,8 @@ export class DatabaseGameRepository implements GameRepository {
          FROM transactions t
          JOIN instruments i ON i.id = t.instrument_id
          JOIN portfolios pf ON pf.id = t.portfolio_id
-        WHERE pf.account_id IS NOT NULL
+         LEFT JOIN ai_traders ait ON ait.portfolio_id = pf.id
+        WHERE pf.account_id IS NOT NULL OR ait.trader_kind = 'LLM'
         ORDER BY t.created_at DESC`,
     );
 
@@ -1131,6 +1380,107 @@ export class DatabaseGameRepository implements GameRepository {
         createdAt: new Date(row.created_at).toISOString(),
       });
     }
+
+    const orderResult = await this.connection.client.query<{
+      id: string;
+      portfolio_id: string;
+      instrument_id: string;
+      symbol: string;
+      name: string;
+      market: StockMarket;
+      side: "BUY" | "SELL";
+      order_mode: "MARKET" | "LIMIT";
+      status: OrderStatus;
+      quantity: number;
+      filled_quantity: number;
+      limit_price: number | null;
+      quote_currency: QuoteCurrency;
+      reserved_cash_usd: number;
+      reserved_quantity: number;
+      actor_type: TradeActorType;
+      actor_id: string;
+      idempotency_key: string | null;
+      created_at: Date | string;
+      updated_at: Date | string;
+      filled_at: Date | string | null;
+      cancelled_at: Date | string | null;
+      transaction_id: string | null;
+    }>(
+      `SELECT o.id, o.portfolio_id, o.instrument_id,
+              i.symbol, i.name, i.market, o.side, o.order_mode,
+              o.status, o.quantity, o.filled_quantity,
+              o.limit_price::float8, o.quote_currency,
+              o.reserved_cash_usd::float8, o.reserved_quantity,
+              o.actor_type, o.actor_id, o.idempotency_key,
+              o.created_at, o.updated_at, o.filled_at,
+              o.cancelled_at, o.transaction_id
+         FROM orders o
+         JOIN instruments i ON i.id = o.instrument_id
+        ORDER BY o.created_at DESC`,
+    );
+
+    for (const row of orderResult.rows) {
+      this.#orders.set(row.id, {
+        id: row.id,
+        mode: "VIRTUAL",
+        portfolioId: row.portfolio_id,
+        instrumentId: row.instrument_id,
+        symbol: row.symbol,
+        name: row.name,
+        market: row.market,
+        side: row.side,
+        orderMode: row.order_mode,
+        status: row.status,
+        quantity: row.quantity,
+        filledQuantity: row.filled_quantity,
+        limitPrice: row.limit_price,
+        quoteCurrency: row.quote_currency,
+        reservedCashUsd: row.reserved_cash_usd,
+        reservedQuantity: row.reserved_quantity,
+        actorType: row.actor_type,
+        actorId: row.actor_id,
+        idempotencyKey: row.idempotency_key ?? undefined,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        filledAt: row.filled_at
+          ? new Date(row.filled_at).toISOString()
+          : null,
+        cancelledAt: row.cancelled_at
+          ? new Date(row.cancelled_at).toISOString()
+          : null,
+        transactionId: row.transaction_id,
+      });
+    }
+  }
+
+  async ensureAIPortfolioCashFloor(
+    portfolioId: string,
+    thresholdUsd: number,
+    topUpUsd: number,
+  ): Promise<boolean> {
+    const result = await this.connection.client.query<{
+      initial_cash_usd: number;
+      available_cash_usd: number;
+    }>(
+      `UPDATE portfolios
+          SET initial_cash_usd = initial_cash_usd + $3,
+              available_cash_usd = available_cash_usd + $3
+        WHERE id = $1
+          AND available_cash_usd + frozen_cash_usd < $2
+      RETURNING initial_cash_usd::float8, available_cash_usd::float8`,
+      [portfolioId, thresholdUsd, topUpUsd],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      if (!this.#portfolios.has(portfolioId)) {
+        throw new Error("PORTFOLIO_NOT_FOUND");
+      }
+      return false;
+    }
+    const portfolio = this.#requirePortfolio(portfolioId);
+    portfolio.initialCashUsd = row.initial_cash_usd;
+    portfolio.availableCashUsd = row.available_cash_usd;
+    return true;
   }
 
   #requireAccount(accountId: string): AccountRecord {
@@ -1162,6 +1512,47 @@ function chunked<T>(items: T[], chunkSize: number): T[][] {
   }
 
   return chunks;
+}
+
+function toOrderValues(order: OrderRecord) {
+  return {
+    id: order.id,
+    portfolioId: order.portfolioId,
+    instrumentId: order.instrumentId,
+    side: order.side,
+    orderMode: order.orderMode,
+    status: order.status,
+    quantity: order.quantity,
+    filledQuantity: order.filledQuantity,
+    limitPrice: order.limitPrice,
+    quoteCurrency: order.quoteCurrency,
+    reservedCashUsd: order.reservedCashUsd,
+    reservedQuantity: order.reservedQuantity,
+    actorType: order.actorType,
+    actorId: order.actorId,
+    idempotencyKey: order.idempotencyKey,
+    createdAt: new Date(order.createdAt),
+    updatedAt: new Date(order.updatedAt),
+    filledAt: order.filledAt ? new Date(order.filledAt) : null,
+    cancelledAt: order.cancelledAt
+      ? new Date(order.cancelledAt)
+      : null,
+    transactionId: order.transactionId,
+  };
+}
+
+function toOrderUpdateValues(order: OrderRecord) {
+  const values = toOrderValues(order);
+  return {
+    status: values.status,
+    filledQuantity: values.filledQuantity,
+    reservedCashUsd: values.reservedCashUsd,
+    reservedQuantity: values.reservedQuantity,
+    updatedAt: values.updatedAt,
+    filledAt: values.filledAt,
+    cancelledAt: values.cancelledAt,
+    transactionId: values.transactionId,
+  };
 }
 
 function candleSeriesKey(

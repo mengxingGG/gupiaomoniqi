@@ -2,6 +2,7 @@ import type {
   Quote,
   TradeActorType,
 } from "@gupiaomoniqi/shared";
+import { quotePriceToUsd } from "@gupiaomoniqi/shared";
 import { GAME_RULES } from "../config.js";
 import { marketDateKey } from "../domain/marketRules.js";
 import { clamp, roundPercent, roundPrice } from "../domain/money.js";
@@ -13,13 +14,26 @@ import type {
 export type RandomSource = () => number;
 export type Clock = () => Date;
 
+export const VIRTUAL_MARKET_IMPACT_RULES = {
+  naturalVolatilityMultiplier: 1.2,
+  minimumDepthUsd: 1_000_000,
+  maximumDepthUsd: 100_000_000,
+  depthLiquidityMultiplier: 20,
+  maximumVolumeParticipationShockRate: 0.002,
+  maximumNewShockRate: 0.025,
+  maximumImpactReservoirRate: 0.04,
+  maximumAppliedImpactPerTickRate: 0.02,
+  impactResidualDecay: 0.6,
+} as const;
+
 export class VirtualMarketEngine {
   readonly #sectorFactors = new Map<string, number>();
   readonly #marketFactors = new Map<string, number>();
-  readonly #tradePressure = new Map<string, number>();
+  readonly #impactReservoir = new Map<string, number>();
   readonly #netOrderFlow = new Map<string, number>();
   readonly #pendingTradeVolume = new Map<string, number>();
-  readonly #pendingTradeNotional = new Map<string, number>();
+  readonly #pendingSignedTradeVolume = new Map<string, number>();
+  readonly #pendingSignedTradeNotionalUsd = new Map<string, number>();
   readonly #instrumentsById = new Map<string, InstrumentRecord>();
   readonly #quotesById = new Map<string, Quote>();
 
@@ -38,7 +52,8 @@ export class VirtualMarketEngine {
     instrumentId: string,
     side: "BUY" | "SELL",
     quantity: number,
-    actorType: TradeActorType,
+    _actorType: TradeActorType,
+    grossAmountUsd?: number,
   ): void {
     const instrument = this.#instrumentsById.get(instrumentId);
 
@@ -50,25 +65,17 @@ export class VirtualMarketEngine {
     const referencePrice =
       this.#quotesById.get(instrumentId)?.currentPrice ??
       instrument.initialPrice;
-    const participation =
-      quantity /
-      Math.max(
-        instrument.liquidity,
-        instrument.lotSize * 20,
-      );
-    const actorWeight = actorType === "AI" ? 1 : 0.85;
-    const delta =
-      direction *
-      actorWeight *
-      clamp(participation * 0.012, 0.000004, 0.0012);
-    const currentPressure =
-      this.#tradePressure.get(instrumentId) ?? 0;
+    const referencePriceUsd = quotePriceToUsd(
+      referencePrice,
+      instrument.quoteCurrency,
+    );
+    const suppliedNotionalUsd = grossAmountUsd ?? 0;
+    const notionalUsd =
+      Number.isFinite(suppliedNotionalUsd) && suppliedNotionalUsd > 0
+        ? suppliedNotionalUsd
+        : quantity * referencePriceUsd;
     const currentFlow = this.#netOrderFlow.get(instrumentId) ?? 0;
 
-    this.#tradePressure.set(
-      instrumentId,
-      clamp(currentPressure + delta, -0.004, 0.004),
-    );
     this.#netOrderFlow.set(
       instrumentId,
       clamp(
@@ -81,10 +88,15 @@ export class VirtualMarketEngine {
       instrumentId,
       (this.#pendingTradeVolume.get(instrumentId) ?? 0) + quantity,
     );
-    this.#pendingTradeNotional.set(
+    this.#pendingSignedTradeVolume.set(
       instrumentId,
-      (this.#pendingTradeNotional.get(instrumentId) ?? 0) +
-        quantity * referencePrice,
+      (this.#pendingSignedTradeVolume.get(instrumentId) ?? 0) +
+        direction * quantity,
+    );
+    this.#pendingSignedTradeNotionalUsd.set(
+      instrumentId,
+      (this.#pendingSignedTradeNotionalUsd.get(instrumentId) ?? 0) +
+        direction * notionalUsd,
     );
   }
 
@@ -137,9 +149,12 @@ export class VirtualMarketEngine {
       const previousMarketFactor =
         this.#marketFactors.get(instrument.market) ?? 0;
       const marketFactor = clamp(
-        previousMarketFactor * 0.82 + this.#centeredRandom(0.00055),
-        -0.0012,
-        0.0012,
+        previousMarketFactor * 0.82 +
+          this.#centeredRandom(
+            0.00055 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+          ),
+        -0.0012 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+        0.0012 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
       );
       this.#marketFactors.set(instrument.market, marketFactor);
       currentMarketFactors.set(instrument.market, marketFactor);
@@ -176,9 +191,12 @@ export class VirtualMarketEngine {
       const previousSectorFactor =
         this.#sectorFactors.get(sectorKey) ?? 0;
       const sectorFactor = clamp(
-        previousSectorFactor * 0.76 + this.#centeredRandom(0.00035),
-        -0.0008,
-        0.0008,
+        previousSectorFactor * 0.76 +
+          this.#centeredRandom(
+            0.00035 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+          ),
+        -0.0008 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+        0.0008 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
       );
       this.#sectorFactors.set(sectorKey, sectorFactor);
 
@@ -186,13 +204,27 @@ export class VirtualMarketEngine {
         (working.currentPrice - working.previousClose) /
         working.previousClose;
       const meanReversion = -distanceFromClose * 0.018;
-      const individualNoise = this.#centeredRandom(instrument.volatility);
-      const orderFlowPressure =
-        this.#tradePressure.get(instrument.id) ?? 0;
+      const individualNoise = this.#centeredRandom(
+        instrument.volatility *
+          VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+      );
       const pendingVolume =
         this.#pendingTradeVolume.get(instrument.id) ?? 0;
-      const pendingNotional =
-        this.#pendingTradeNotional.get(instrument.id) ?? 0;
+      const pendingSignedVolume =
+        this.#pendingSignedTradeVolume.get(instrument.id) ?? 0;
+      const pendingSignedNotionalUsd =
+        this.#pendingSignedTradeNotionalUsd.get(instrument.id) ?? 0;
+      const currentPriceUsd = quotePriceToUsd(
+        working.currentPrice,
+        working.quoteCurrency,
+      );
+      const impactDepthUsd = clamp(
+        currentPriceUsd *
+          Math.max(instrument.liquidity, instrument.lotSize * 20) *
+          VIRTUAL_MARKET_IMPACT_RULES.depthLiquidityMultiplier,
+        VIRTUAL_MARKET_IMPACT_RULES.minimumDepthUsd,
+        VIRTUAL_MARKET_IMPACT_RULES.maximumDepthUsd,
+      );
       const volumeShare = clamp(
         pendingVolume /
           Math.max(
@@ -203,34 +235,48 @@ export class VirtualMarketEngine {
         25,
       );
       const notionalShare = clamp(
-        pendingNotional /
-          Math.max(
-            working.currentPrice * instrument.liquidity,
-            working.currentPrice * instrument.lotSize * 20,
-          ),
+        Math.abs(pendingSignedNotionalUsd) / impactDepthUsd,
         0,
         25,
       );
-      const flowDirection = Math.sign(
-        this.#netOrderFlow.get(instrument.id) ?? 0,
-      );
-      const activityImpulse =
-        flowDirection *
-        clamp(
-          Math.sqrt(volumeShare) * 0.001 +
-            Math.sqrt(notionalShare) * 0.0012,
-          0,
-          0.002,
+      const notionalShock =
+        VIRTUAL_MARKET_IMPACT_RULES.maximumNewShockRate *
+        Math.tanh(pendingSignedNotionalUsd / impactDepthUsd);
+      const volumeParticipationShock =
+        VIRTUAL_MARKET_IMPACT_RULES.maximumVolumeParticipationShockRate *
+        Math.tanh(
+          (pendingSignedVolume /
+            Math.max(instrument.liquidity, instrument.lotSize * 20)) *
+            10,
         );
-      const changeRate = clamp(
-        marketFactor +
-          sectorFactor +
-          individualNoise +
-          orderFlowPressure +
-          activityImpulse +
-          meanReversion,
+      const newTradeShock = clamp(
+        notionalShock + volumeParticipationShock,
+        -VIRTUAL_MARKET_IMPACT_RULES.maximumNewShockRate,
+        VIRTUAL_MARKET_IMPACT_RULES.maximumNewShockRate,
+      );
+      const impactReservoir = clamp(
+        (this.#impactReservoir.get(instrument.id) ?? 0) + newTradeShock,
+        -VIRTUAL_MARKET_IMPACT_RULES.maximumImpactReservoirRate,
+        VIRTUAL_MARKET_IMPACT_RULES.maximumImpactReservoirRate,
+      );
+      const appliedTradeImpact = clamp(
+        impactReservoir,
+        -VIRTUAL_MARKET_IMPACT_RULES.maximumAppliedImpactPerTickRate,
+        VIRTUAL_MARKET_IMPACT_RULES.maximumAppliedImpactPerTickRate,
+      );
+      const naturalChangeRate = clamp(
+        marketFactor + sectorFactor + individualNoise + meanReversion,
         -GAME_RULES.maxTickChangeRate,
         GAME_RULES.maxTickChangeRate,
+      );
+      const changeRate = clamp(
+        naturalChangeRate + appliedTradeImpact,
+        -(
+          GAME_RULES.maxTickChangeRate +
+          VIRTUAL_MARKET_IMPACT_RULES.maximumAppliedImpactPerTickRate
+        ),
+        GAME_RULES.maxTickChangeRate +
+          VIRTUAL_MARKET_IMPACT_RULES.maximumAppliedImpactPerTickRate,
       );
 
       const lowerLimit =
@@ -260,16 +306,21 @@ export class VirtualMarketEngine {
       const changePercent = roundPercent(
         (changeAmount / working.previousClose) * 100,
       );
-      this.#tradePressure.set(
-        instrument.id,
-        orderFlowPressure * 0.52,
-      );
+      const remainingImpact =
+        (impactReservoir - appliedTradeImpact) *
+        VIRTUAL_MARKET_IMPACT_RULES.impactResidualDecay;
+      if (Math.abs(remainingImpact) < 0.000001) {
+        this.#impactReservoir.delete(instrument.id);
+      } else {
+        this.#impactReservoir.set(instrument.id, remainingImpact);
+      }
       this.#netOrderFlow.set(
         instrument.id,
         (this.#netOrderFlow.get(instrument.id) ?? 0) * 0.78,
       );
       this.#pendingTradeVolume.delete(instrument.id);
-      this.#pendingTradeNotional.delete(instrument.id);
+      this.#pendingSignedTradeVolume.delete(instrument.id);
+      this.#pendingSignedTradeNotionalUsd.delete(instrument.id);
 
       return {
         ...working,

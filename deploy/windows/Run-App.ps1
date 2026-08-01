@@ -241,6 +241,7 @@ else {
     "true"
 }
 $env:APP_UPDATE_DIR = $appUpdateDirectory
+$env:APP_CONFIG_PATH = Join-Path $dataDirectory "config.json"
 
 $latestPath = Join-Path $runtimeDirectory "app-latest.json"
 $shutdownRequestPath = Join-Path (

@@ -5,16 +5,17 @@ import type {
   MarketItem,
   MarketMode,
   OrderBookSnapshot,
+  OrderSubmissionResult,
   PortfolioSnapshot,
   PublicAccount,
   Quote,
-  TradeResult,
 } from "@gupiaomoniqi/shared";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addWatchlist,
   fetchChart,
   fetchInstrument,
+  fetchOrders,
   fetchOrderBook,
   fetchPortfolio,
   fetchWatchlist,
@@ -73,6 +74,8 @@ export function StockPage({
   const [error, setError] = useState<string | null>(null);
   const [watchlisted, setWatchlisted] = useState(false);
   const [watchlistUpdating, setWatchlistUpdating] = useState(false);
+  const [hasOpenOrders, setHasOpenOrders] = useState(false);
+  const accountSyncEpochRef = useRef(0);
 
   const connection = useQuoteSocket(
     { instrumentId, mode },
@@ -99,20 +102,17 @@ export function StockPage({
     Promise.all([
       fetchInstrument(instrumentId, mode),
       fetchOrderBook(instrumentId, mode),
-      account ? fetchPortfolio(mode) : Promise.resolve(null),
       account ? fetchWatchlist(mode) : Promise.resolve(null),
     ])
       .then(
         ([
           nextItem,
           nextOrderBook,
-          nextPortfolio,
           nextWatchlist,
         ]) => {
         if (active) {
           setItem(nextItem);
           setOrderBook(nextOrderBook);
-          setPortfolio(nextPortfolio);
           setWatchlisted(
             nextWatchlist?.instrumentIds.includes(instrumentId) ??
               false,
@@ -138,7 +138,55 @@ export function StockPage({
     return () => {
       active = false;
     };
-  }, [account, instrumentId, mode]);
+  }, [account?.id, instrumentId, mode]);
+
+  useEffect(() => {
+    accountSyncEpochRef.current += 1;
+    if (!account) {
+      setPortfolio(null);
+      setHasOpenOrders(false);
+      return;
+    }
+
+    let active = true;
+    let timer: number | undefined;
+
+    const refreshAccount = async () => {
+      const requestEpoch = ++accountSyncEpochRef.current;
+      let nextHasOpenOrders = hasOpenOrders;
+      try {
+        const nextOpenOrders = await fetchOrders(mode, "OPEN");
+        const nextPortfolio = await fetchPortfolio(mode);
+        nextHasOpenOrders = nextOpenOrders.length > 0;
+        if (
+          active &&
+          requestEpoch === accountSyncEpochRef.current
+        ) {
+          setPortfolio(nextPortfolio);
+          setHasOpenOrders(nextHasOpenOrders);
+        }
+      } catch {
+        // 详情行情仍可继续使用；账户同步在下一轮自动重试。
+      } finally {
+        if (active) {
+          timer = window.setTimeout(
+            () => void refreshAccount(),
+            nextHasOpenOrders ? 2_000 : 5_000,
+          );
+        }
+      }
+    };
+
+    void refreshAccount();
+
+    return () => {
+      active = false;
+      accountSyncEpochRef.current += 1;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [account?.id, hasOpenOrders, mode]);
 
   useEffect(() => {
     let active = true;
@@ -187,8 +235,12 @@ export function StockPage({
     [instrumentId, portfolio],
   );
 
-  function handleTradeCompleted(result: TradeResult) {
+  function handleTradeCompleted(result: OrderSubmissionResult) {
+    accountSyncEpochRef.current += 1;
     setPortfolio(result.portfolio);
+    if (result.order.status === "OPEN") {
+      setHasOpenOrders(true);
+    }
   }
 
   async function toggleWatchlist() {

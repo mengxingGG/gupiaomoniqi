@@ -10,6 +10,12 @@ enum class OrderMode {
     LIMIT,
 }
 
+enum class LimitOrderStatus {
+    OPEN,
+    FILLED,
+    CANCELLED,
+}
+
 enum class TradeActorType {
     USER,
     AI,
@@ -42,13 +48,54 @@ data class TradeRequest(
     val side: TradeSide,
     val quantity: Int,
     val orderMode: OrderMode = OrderMode.MARKET,
+    val limitPrice: Double? = null,
     val idempotencyKey: String? = null,
 ) {
     init {
         require(instrumentId.isNotBlank()) { "instrumentId must not be blank" }
         require(quantity > 0) { "quantity must be positive" }
+        if (orderMode == OrderMode.LIMIT) {
+            require(limitPrice != null && limitPrice.isFinite() && limitPrice > 0) {
+                "limitPrice must be positive for a limit order"
+            }
+        }
     }
 }
+
+data class LimitOrder(
+    val id: String,
+    val mode: MarketMode,
+    val instrumentId: String,
+    val symbol: String,
+    val name: String,
+    val market: Market,
+    val side: TradeSide,
+    val orderMode: OrderMode,
+    val status: LimitOrderStatus,
+    val quantity: Int,
+    val filledQuantity: Int,
+    val limitPrice: Double?,
+    val quoteCurrency: Currency,
+    val reservedCashUsd: Double,
+    val reservedQuantity: Int,
+    val actorType: TradeActorType,
+    val createdAt: String,
+    val updatedAt: String,
+    val filledAt: String?,
+    val cancelledAt: String?,
+    val transactionId: String?,
+)
+
+data class OrderSubmissionResult(
+    val order: LimitOrder,
+    val transaction: Transaction?,
+    val portfolio: Portfolio,
+)
+
+data class OrderCancellationResult(
+    val order: LimitOrder,
+    val portfolio: Portfolio,
+)
 
 data class TradeResult(
     val transaction: Transaction,

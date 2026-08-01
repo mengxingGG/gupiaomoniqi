@@ -165,6 +165,43 @@ CREATE UNIQUE INDEX IF NOT EXISTS real_transactions_idempotency_idx
 CREATE INDEX IF NOT EXISTS real_transactions_portfolio_time_idx
   ON real_transactions (portfolio_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS real_orders (
+  id UUID PRIMARY KEY,
+  portfolio_id UUID NOT NULL
+    REFERENCES real_portfolios(id) ON DELETE CASCADE,
+  instrument_id TEXT NOT NULL REFERENCES real_instruments(id),
+  side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  order_mode TEXT NOT NULL CHECK (order_mode IN ('MARKET', 'LIMIT')),
+  status TEXT NOT NULL CHECK (status IN ('OPEN', 'FILLED', 'CANCELLED')),
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  filled_quantity INTEGER NOT NULL DEFAULT 0 CHECK (filled_quantity >= 0),
+  limit_price DOUBLE PRECISION,
+  quote_currency TEXT NOT NULL CHECK (quote_currency IN ('CNY', 'USD')),
+  reserved_cash_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  reserved_quantity INTEGER NOT NULL DEFAULT 0,
+  actor_type TEXT NOT NULL DEFAULT 'USER' CHECK (actor_type IN ('USER', 'AI')),
+  actor_id TEXT NOT NULL,
+  idempotency_key TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  filled_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  transaction_id UUID REFERENCES real_transactions(id) ON DELETE SET NULL,
+  CHECK (
+    (order_mode = 'MARKET' AND limit_price IS NULL) OR
+    (order_mode = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0)
+  ),
+  CHECK (filled_quantity <= quantity)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS real_orders_idempotency_idx
+  ON real_orders (portfolio_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS real_orders_portfolio_time_idx
+  ON real_orders (portfolio_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS real_orders_open_instrument_idx
+  ON real_orders (status, instrument_id, created_at);
+
 CREATE TABLE IF NOT EXISTS real_position_settlement_lots (
   id UUID PRIMARY KEY,
   portfolio_id UUID NOT NULL
@@ -192,22 +229,100 @@ CREATE TABLE IF NOT EXISTS real_cash_adjustments (
 );
 `;
 
+const REAL_MARKET_MIGRATIONS = [
+  {
+    version: 2,
+    sql: `
+      ALTER TABLE real_candles
+        ADD COLUMN IF NOT EXISTS average_price DOUBLE PRECISION;
+      ALTER TABLE real_candles
+        DROP CONSTRAINT IF EXISTS real_candles_interval_check;
+      ALTER TABLE real_candles
+        ADD CONSTRAINT real_candles_interval_check
+        CHECK (interval IN ('MINUTE', 'DAY', 'MONTH', 'YEAR'));
+    `,
+  },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE IF NOT EXISTS real_orders (
+        id UUID PRIMARY KEY,
+        portfolio_id UUID NOT NULL
+          REFERENCES real_portfolios(id) ON DELETE CASCADE,
+        instrument_id TEXT NOT NULL REFERENCES real_instruments(id),
+        side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+        order_mode TEXT NOT NULL CHECK (order_mode IN ('MARKET', 'LIMIT')),
+        status TEXT NOT NULL CHECK (status IN ('OPEN', 'FILLED', 'CANCELLED')),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        filled_quantity INTEGER NOT NULL DEFAULT 0
+          CHECK (filled_quantity >= 0),
+        limit_price DOUBLE PRECISION,
+        quote_currency TEXT NOT NULL CHECK (quote_currency IN ('CNY', 'USD')),
+        reserved_cash_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        reserved_quantity INTEGER NOT NULL DEFAULT 0,
+        actor_type TEXT NOT NULL DEFAULT 'USER'
+          CHECK (actor_type IN ('USER', 'AI')),
+        actor_id TEXT NOT NULL,
+        idempotency_key TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        filled_at TIMESTAMPTZ,
+        cancelled_at TIMESTAMPTZ,
+        transaction_id UUID REFERENCES real_transactions(id) ON DELETE SET NULL,
+        CHECK (
+          (order_mode = 'MARKET' AND limit_price IS NULL) OR
+          (order_mode = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0)
+        ),
+        CHECK (filled_quantity <= quantity)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS real_orders_idempotency_idx
+        ON real_orders (portfolio_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS real_orders_portfolio_time_idx
+        ON real_orders (portfolio_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS real_orders_open_instrument_idx
+        ON real_orders (status, instrument_id, created_at);
+    `,
+  },
+  {
+    version: 4,
+    sql: `
+      ALTER TABLE real_portfolios
+        ADD COLUMN IF NOT EXISTS frozen_cash_usd DOUBLE PRECISION
+        NOT NULL DEFAULT 0;
+      ALTER TABLE real_positions
+        ADD COLUMN IF NOT EXISTS frozen_quantity INTEGER
+        NOT NULL DEFAULT 0 CHECK (frozen_quantity >= 0);
+    `,
+  },
+] as const;
+
 export async function migrateRealDatabase(
   client: PGlite,
 ): Promise<void> {
   await client.exec(REAL_MARKET_SCHEMA);
-  await client.exec(`
-    ALTER TABLE real_candles
-      ADD COLUMN IF NOT EXISTS average_price DOUBLE PRECISION;
-    ALTER TABLE real_candles
-      DROP CONSTRAINT IF EXISTS real_candles_interval_check;
-    ALTER TABLE real_candles
-      ADD CONSTRAINT real_candles_interval_check
-      CHECK (interval IN ('MINUTE', 'DAY', 'MONTH', 'YEAR'));
-  `);
   await client.query(
     `INSERT INTO schema_migrations (version)
-     VALUES (1), (2)
+     VALUES (1)
      ON CONFLICT (version) DO NOTHING`,
   );
+
+  for (const migration of REAL_MARKET_MIGRATIONS) {
+    await client.transaction(async (transaction) => {
+      const applied = await transaction.query<{ version: number }>(
+        `SELECT version FROM schema_migrations WHERE version = $1`,
+        [migration.version],
+      );
+      if (applied.rows.length > 0) {
+        return;
+      }
+
+      await transaction.exec(migration.sql);
+      await transaction.query(
+        `INSERT INTO schema_migrations (version) VALUES ($1)`,
+        [migration.version],
+      );
+    });
+  }
 }

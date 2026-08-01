@@ -6,6 +6,7 @@ export type DisplayCurrency = "CNY" | "USD";
 export type QuoteCurrency = "CNY" | "USD";
 export type TradeSide = "BUY" | "SELL";
 export type OrderMode = "MARKET" | "LIMIT";
+export type OrderStatus = "OPEN" | "FILLED" | "CANCELLED";
 export type ChartRange = "INTRADAY" | "DAY" | "MONTH" | "YEAR";
 export type CandleInterval = "MINUTE" | "DAY" | "MONTH" | "YEAR";
 export type CandleSource =
@@ -170,11 +171,48 @@ export interface TradeRequest {
   side: TradeSide;
   quantity: number;
   orderMode?: OrderMode;
+  /** 限价单价格，单位始终为标的 quoteCurrency。 */
+  limitPrice?: number;
   idempotencyKey?: string;
 }
 
 export interface TradeResult {
   transaction: Transaction;
+  portfolio: PortfolioSnapshot;
+}
+
+export interface LimitOrder {
+  id: string;
+  mode: MarketMode;
+  instrumentId: string;
+  symbol: string;
+  name: string;
+  market: StockMarket;
+  side: TradeSide;
+  orderMode: OrderMode;
+  status: OrderStatus;
+  quantity: number;
+  filledQuantity: number;
+  limitPrice: number | null;
+  quoteCurrency: QuoteCurrency;
+  reservedCashUsd: number;
+  reservedQuantity: number;
+  actorType: TradeActorType;
+  createdAt: string;
+  updatedAt: string;
+  filledAt: string | null;
+  cancelledAt: string | null;
+  transactionId: string | null;
+}
+
+export interface OrderSubmissionResult {
+  order: LimitOrder;
+  transaction?: Transaction;
+  portfolio: PortfolioSnapshot;
+}
+
+export interface OrderCancellationResult {
+  order: LimitOrder;
   portfolio: PortfolioSnapshot;
 }
 

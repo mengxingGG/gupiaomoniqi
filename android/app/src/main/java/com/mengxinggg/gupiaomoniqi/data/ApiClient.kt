@@ -9,13 +9,16 @@ import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
+import com.mengxinggg.gupiaomoniqi.model.LimitOrder
+import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
 import com.mengxinggg.gupiaomoniqi.model.OrderBook
+import com.mengxinggg.gupiaomoniqi.model.OrderCancellationResult
+import com.mengxinggg.gupiaomoniqi.model.OrderSubmissionResult
 import com.mengxinggg.gupiaomoniqi.model.Page
 import com.mengxinggg.gupiaomoniqi.model.Portfolio
 import com.mengxinggg.gupiaomoniqi.model.PublicAccount
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
-import com.mengxinggg.gupiaomoniqi.model.TradeResult
 import com.mengxinggg.gupiaomoniqi.model.Transaction
 import com.mengxinggg.gupiaomoniqi.model.Watchlist
 import java.io.IOException
@@ -443,26 +446,52 @@ class ApiClient(
         decode = JsonCodec::transactions,
     )
 
-    fun trade(
+    fun submitOrder(
         mode: MarketMode,
         trade: TradeRequest,
-    ): TradeResult {
+    ): OrderSubmissionResult {
         val body = JSONObject()
             .put("mode", mode.name)
             .put("instrumentId", trade.instrumentId)
             .put("side", trade.side.name)
             .put("quantity", trade.quantity)
             .put("orderMode", trade.orderMode.name)
+        trade.limitPrice?.let {
+            body.put("limitPrice", it)
+        }
         trade.idempotencyKey?.let {
             body.put("idempotencyKey", it)
         }
         return requestObject(
             method = "POST",
-            path = "/api/trades",
+            path = "/api/orders",
             body = body,
-            decode = JsonCodec::tradeResult,
+            decode = JsonCodec::orderSubmissionResult,
         )
     }
+
+    fun orders(
+        mode: MarketMode,
+        status: LimitOrderStatus? = null,
+    ): List<LimitOrder> {
+        val query = linkedMapOf("mode" to mode.name)
+        status?.let { query["status"] = it.name }
+        return requestArray(
+            path = "/api/account/orders",
+            query = query,
+            decode = JsonCodec::limitOrders,
+        )
+    }
+
+    fun cancelOrder(
+        mode: MarketMode,
+        orderId: String,
+    ): OrderCancellationResult = requestObject(
+        method = "DELETE",
+        path = "/api/orders/${ApiUrl.encodePathSegment(orderId)}",
+        query = mapOf("mode" to mode.name),
+        decode = JsonCodec::orderCancellationResult,
+    )
 
     fun watchlist(mode: MarketMode): Watchlist = requestObject(
         path = "/api/watchlist",

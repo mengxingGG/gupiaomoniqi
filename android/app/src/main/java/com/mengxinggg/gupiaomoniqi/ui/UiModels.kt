@@ -42,6 +42,17 @@ enum class UiTradeSide {
     SELL,
 }
 
+enum class UiOrderMode(val label: String) {
+    MARKET("市价"),
+    LIMIT("限价"),
+}
+
+enum class UiOrderStatus(val label: String) {
+    OPEN("委托中"),
+    FILLED("已成交"),
+    CANCELLED("已撤单"),
+}
+
 enum class AuthMode {
     REGISTER,
     LOGIN,
@@ -101,6 +112,7 @@ data class PositionUi(
     val market: String,
     val quantity: Double,
     val availableQuantity: Double,
+    val frozenQuantity: Double,
     val pendingSettlementQuantity: Double,
     val averageCostUsd: Double,
     val currentPriceUsd: Double,
@@ -133,6 +145,25 @@ data class TransactionUi(
     val createdAt: String,
 )
 
+data class LimitOrderUi(
+    val id: String,
+    val instrumentId: String,
+    val symbol: String,
+    val name: String,
+    val market: String,
+    val side: UiTradeSide,
+    val orderMode: UiOrderMode,
+    val status: UiOrderStatus,
+    val quantity: Double,
+    val filledQuantity: Double,
+    val limitPrice: Double?,
+    val quoteCurrency: String,
+    val reservedCashUsd: Double,
+    val reservedQuantity: Double,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
 data class CheckInUi(
     val claimed: Boolean,
     val rewardUsd: Double,
@@ -142,6 +173,9 @@ data class CheckInUi(
 data class TradeSheetUi(
     val stock: StockUi,
     val side: UiTradeSide,
+    val orderMode: UiOrderMode = UiOrderMode.MARKET,
+    val limitPriceInput: String = "",
+    val limitPriceCurrency: UiDisplayCurrency,
     val lots: Int = 1,
     val maxLots: Int = 0,
     val idempotencyKey: String,
@@ -182,8 +216,10 @@ data class AppUiState(
     val orderBook: OrderBookUi? = null,
     val portfolio: PortfolioUi? = null,
     val transactions: List<TransactionUi> = emptyList(),
+    val orders: List<LimitOrderUi> = emptyList(),
     val accountLoading: Boolean = false,
     val accountError: String? = null,
+    val cancellingOrderId: String? = null,
     val checkIn: CheckInUi? = null,
     val rewardBusy: Boolean = false,
     val authMode: AuthMode = AuthMode.REGISTER,

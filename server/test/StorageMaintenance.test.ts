@@ -27,6 +27,7 @@ describe("StorageMaintenance", () => {
     const userAccountId = randomUUID();
     const userPortfolioId = randomUUID();
     const aiPortfolioId = randomUUID();
+    const aiTraderId = randomUUID();
     const instrumentId = "us-aapl";
     const importBatchId = randomUUID();
 
@@ -42,6 +43,20 @@ describe("StorageMaintenance", () => {
       ) VALUES
         ('${userPortfolioId}', '${userAccountId}', '用户组合', 'VIRTUAL', 'USD', 1000, 1000, 0),
         ('${aiPortfolioId}', NULL, 'AI组合', 'VIRTUAL', 'USD', 1000, 1000, 0);
+      INSERT INTO ai_traders (
+        id, portfolio_id, name, strategy, psychology, risk_level,
+        activity_level, preferred_market, trader_kind, persona_key,
+        is_active, next_action_at
+      ) VALUES (
+        '${aiTraderId}', '${aiPortfolioId}', 'LLM 测试员', 'MOMENTUM',
+        '测试', 5, 5, 'US', 'LLM', 'maintenance-test', true,
+        '2026-07-29T12:00:00.000Z'
+      );
+      INSERT INTO ai_trader_decisions (
+        id, trader_id, decided_at, action, result, model_id
+      ) VALUES
+        ('${randomUUID()}', '${aiTraderId}', '2026-06-01T00:00:00.000Z', 'HOLD', 'HOLD', 'test-model'),
+        ('${randomUUID()}', '${aiTraderId}', '2026-07-29T00:00:00.000Z', 'HOLD', 'HOLD', 'test-model');
       INSERT INTO market_import_batches (
         id, source, source_host, source_fetched_at, selection,
         requested_per_market, instrument_count, market_counts,
@@ -113,6 +128,7 @@ describe("StorageMaintenance", () => {
     });
 
     expect(result.virtual?.deletedExpiredSessions).toBe(1);
+    expect(result.virtual?.deletedOldAiDecisions).toBe(1);
     expect(result.virtual?.deletedOldAiTransactions).toBe(1);
     expect(result.virtual?.deletedOldMinuteCandles).toBe(1);
     expect(result.virtual?.deletedSettledLots).toBe(1);
@@ -127,6 +143,9 @@ describe("StorageMaintenance", () => {
       `SELECT count(*)::int AS count
          FROM transactions
         WHERE actor_type = 'AI'`,
+    );
+    const aiDecisions = await client.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM ai_trader_decisions`,
     );
     const userTransactions = await client.query<{ count: number }>(
       `SELECT count(*)::int AS count
@@ -145,6 +164,7 @@ describe("StorageMaintenance", () => {
 
     expect(sessions.rows[0]?.count).toBe(1);
     expect(aiTransactions.rows[0]?.count).toBe(1);
+    expect(aiDecisions.rows[0]?.count).toBe(1);
     expect(userTransactions.rows[0]?.count).toBe(1);
     expect(minuteCandles.rows[0]?.count).toBe(1);
     expect(importBatches.rows[0]?.count).toBe(2);

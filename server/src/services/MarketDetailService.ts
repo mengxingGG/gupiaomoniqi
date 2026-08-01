@@ -80,16 +80,64 @@ export class MarketDetailService {
         ),
       );
     }
+    const openOrders = this.repository.listOpenOrders([instrumentId]);
+    const mergedAsks = mergeOrderLevels(
+      asks,
+      openOrders
+        .filter((order) => order.side === "SELL" && order.limitPrice !== null)
+        .map((order) => ({
+          price: order.limitPrice!,
+          quantity: order.quantity - order.filledQuantity,
+        })),
+      "ASC",
+    );
+    const mergedBids = mergeOrderLevels(
+      bids,
+      openOrders
+        .filter((order) => order.side === "BUY" && order.limitPrice !== null)
+        .map((order) => ({
+          price: order.limitPrice!,
+          quantity: order.quantity - order.filledQuantity,
+        })),
+      "DESC",
+    );
 
     return {
       instrumentId,
       quoteCurrency: quote.quoteCurrency,
       mode: "VIRTUAL",
-      asks,
-      bids,
+      asks: mergedAsks,
+      bids: mergedBids,
       updatedAt: quote.updatedAt,
     };
   }
+}
+
+function mergeOrderLevels(
+  generated: OrderBookLevel[],
+  pending: Array<{ price: number; quantity: number }>,
+  direction: "ASC" | "DESC",
+): OrderBookLevel[] {
+  const levels = new Map<number, OrderBookLevel>();
+  for (const level of generated) {
+    levels.set(level.price, { ...level });
+  }
+  for (const order of pending) {
+    const price = roundUnitPrice(order.price);
+    const existing = levels.get(price);
+    levels.set(price, {
+      price,
+      quantity: (existing?.quantity ?? 0) + order.quantity,
+      orderCount: (existing?.orderCount ?? 0) + 1,
+    });
+  }
+  return [...levels.values()]
+    .sort((left, right) =>
+      direction === "ASC"
+        ? left.price - right.price
+        : right.price - left.price,
+    )
+    .slice(0, 5);
 }
 
 function buildLevel(

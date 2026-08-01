@@ -1,6 +1,6 @@
 {
   "name": "@gupiaomoniqi/server",
-  "version": "3.0.0-alpha.1",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
@@ -8,7 +8,7 @@
     "@fastify/cors": "^11.3.0",
     "@fastify/static": "10.1.2",
     "@fastify/websocket": "^11.3.0",
-    "@gupiaomoniqi/shared": "3.0.0-alpha.1",
+    "@gupiaomoniqi/shared": "1.0.0",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.10.0",
     "zod": "^4.4.3"

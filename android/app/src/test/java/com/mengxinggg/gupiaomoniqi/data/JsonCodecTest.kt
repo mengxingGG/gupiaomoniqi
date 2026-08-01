@@ -6,6 +6,8 @@ import com.mengxinggg.gupiaomoniqi.model.ChartSource
 import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
+import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
+import com.mengxinggg.gupiaomoniqi.model.OrderMode
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimState
 import com.mengxinggg.gupiaomoniqi.model.RewardKind
 import com.mengxinggg.gupiaomoniqi.model.TradeSide
@@ -17,6 +19,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JsonCodecTest {
+    @Test
+    fun `parses open limit order with frozen funds and nullable fill fields`() {
+        val order = JsonCodec.limitOrder(JSONObject(openLimitOrderJson()))
+
+        assertEquals(OrderMode.LIMIT, order.orderMode)
+        assertEquals(LimitOrderStatus.OPEN, order.status)
+        assertEquals(205.5, order.limitPrice!!, 0.0001)
+        assertEquals(4_111.23, order.reservedCashUsd, 0.0001)
+        assertNull(order.filledAt)
+        assertNull(order.transactionId)
+    }
+
     @Test
     fun `parses available Android app update with release metadata`() {
         val update = JsonCodec.androidUpdateCheck(

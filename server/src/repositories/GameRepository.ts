@@ -4,6 +4,8 @@ import type {
   CandleInterval,
   DisplayCurrency,
   Instrument,
+  LimitOrder,
+  OrderStatus,
   Quote,
   StockMarket,
   Transaction,
@@ -66,9 +68,32 @@ export interface TradeCommit {
   instrumentId: string;
   occurredAt: string;
   availableCashUsd: number;
+  availableCashDeltaUsd?: number;
+  frozenCashUsd?: number;
+  frozenCashDeltaUsd?: number;
   position: PositionRecord | null;
   transaction?: Transaction;
   settlementLot?: SettlementLotRecord;
+  order?: OrderRecord;
+}
+
+export interface OrderRecord extends LimitOrder {
+  mode: "VIRTUAL";
+  portfolioId: string;
+  actorId: string;
+  idempotencyKey?: string;
+}
+
+export interface OrderStateCommit {
+  portfolioId: string;
+  instrumentId: string;
+  occurredAt: string;
+  availableCashUsd: number;
+  availableCashDeltaUsd?: number;
+  frozenCashUsd: number;
+  frozenCashDeltaUsd?: number;
+  position?: PositionRecord | null;
+  order: OrderRecord;
 }
 
 export interface SettlementLotRecord {
@@ -96,6 +121,8 @@ export interface AITraderRecord {
   riskLevel: number;
   activityLevel: number;
   preferredMarket: StockMarket;
+  traderKind?: "RULE" | "LLM";
+  personaKey?: string | null;
   isActive: boolean;
   lastActionAt: string | null;
   nextActionAt: string;
@@ -103,6 +130,18 @@ export interface AITraderRecord {
   winCount: number;
   lossCount: number;
   createdAt: string;
+}
+
+export interface AITraderDecisionRecord {
+  id: string;
+  traderId: string;
+  decidedAt: string;
+  action: string;
+  instrumentId: string | null;
+  result: string;
+  reason: string | null;
+  modelId: string;
+  detail: string | null;
 }
 
 export interface CreateAITraderCommit {
@@ -151,6 +190,17 @@ export interface GameRepository {
     portfolioId: string,
     idempotencyKey: string,
   ): Transaction | undefined;
+  listOrders(
+    portfolioId: string,
+    status?: OrderStatus,
+  ): OrderRecord[];
+  listOpenOrders(instrumentIds?: string[]): OrderRecord[];
+  getOrderById(orderId: string): OrderRecord | undefined;
+  getOrderByIdempotencyKey(
+    portfolioId: string,
+    idempotencyKey: string,
+  ): OrderRecord | undefined;
+  commitOrderState(commit: OrderStateCommit): Promise<void>;
   commitTrade(commit: TradeCommit): Promise<void>;
   settleDuePositions(at: string): Promise<SettlementResult[]>;
   creditCashAdjustment(
@@ -159,6 +209,11 @@ export interface GameRepository {
     amountUsd: number,
     reason: string,
   ): Promise<void>;
+  ensureAIPortfolioCashFloor(
+    portfolioId: string,
+    thresholdUsd: number,
+    topUpUsd: number,
+  ): Promise<boolean>;
 
   listAITraders(): AITraderRecord[];
   getAITrader(traderId: string): AITraderRecord | undefined;
@@ -168,4 +223,11 @@ export interface GameRepository {
   createAITraders(commits: CreateAITraderCommit[]): Promise<void>;
   updateAITrader(trader: AITraderRecord): Promise<void>;
   updateAITraders(traders: AITraderRecord[]): Promise<void>;
+  listAITraderDecisions(
+    traderId: string,
+    limit: number,
+  ): AITraderDecisionRecord[];
+  appendAITraderDecision(
+    decision: AITraderDecisionRecord,
+  ): Promise<void>;
 }

@@ -11,6 +11,7 @@ const REAL_DAY_CANDLE_LIMIT = 800;
 export interface StorageMaintenanceResult {
   virtual?: {
     deletedExpiredSessions: number;
+    deletedOldAiDecisions: number;
     deletedOldAiTransactions: number;
     deletedOldMinuteCandles: number;
     deletedSettledLots: number;
@@ -59,6 +60,12 @@ async function pruneVirtualStorage(
       `DELETE FROM sessions
         WHERE expires_at < $1`,
       [toIso(now)],
+    ),
+    deletedOldAiDecisions: await deleteCount(
+      client,
+      `DELETE FROM ai_trader_decisions
+        WHERE decided_at < $1`,
+      [toIso(addDays(now, -AI_TRANSACTION_RETENTION_DAYS))],
     ),
     deletedSettledLots: await deleteCount(
       client,

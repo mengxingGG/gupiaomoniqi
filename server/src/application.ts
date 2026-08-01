@@ -19,6 +19,9 @@ import type {
   MarketItem,
   MarketMode,
   MarketSocketMessage,
+  LimitOrder,
+  OrderCancellationResult,
+  OrderSubmissionResult,
   OrderBookSnapshot,
   PaginatedData,
   PortfolioSnapshot,
@@ -40,6 +43,10 @@ import Fastify, {
 import { z } from "zod";
 import { AITradingRuntime } from "./ai/AITradingRuntime.js";
 import { AITradingService } from "./ai/AITradingService.js";
+import { LlamaCppTradingClient } from "./ai/LLMTradingClient.js";
+import { LLMTradingRuntime } from "./ai/LLMTradingRuntime.js";
+import { LLMTradingService } from "./ai/LLMTradingService.js";
+import { RepositoryLLMTradingPort } from "./ai/RepositoryLLMTradingPort.js";
 import { AppUpdateService } from "./app-update/AppUpdateService.js";
 import { registerAppUpdateRoutes } from "./app-update/registerAppUpdateRoutes.js";
 import {
@@ -48,6 +55,7 @@ import {
   REAL_MARKET_CONFIG,
   SECURITY_CONFIG,
 } from "./config.js";
+import { loadRootConfig } from "./config/RootConfig.js";
 import type { DatabaseConnection } from "./db/client.js";
 import { openDatabase } from "./db/client.js";
 import { migrateDatabase } from "./db/migrations.js";
@@ -100,6 +108,38 @@ const tradeSchema = z.object({
   orderMode: z.enum(["MARKET", "LIMIT"]).optional(),
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
   mode: z.enum(["VIRTUAL", "REAL"]).default("VIRTUAL"),
+});
+
+const orderSchema = z
+  .object({
+    instrumentId: z.string().trim().min(1),
+    side: z.enum(["BUY", "SELL"]),
+    quantity: z.number().int().positive(),
+    orderMode: z.enum(["MARKET", "LIMIT"]).default("MARKET"),
+    limitPrice: z.number().positive().finite().optional(),
+    idempotencyKey: z.string().trim().min(8).max(100).optional(),
+    mode: z.enum(["VIRTUAL", "REAL"]).default("VIRTUAL"),
+  })
+  .superRefine((value, context) => {
+    if (value.orderMode === "LIMIT" && value.limitPrice === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["limitPrice"],
+        message: "限价单必须填写限价",
+      });
+    }
+    if (value.orderMode === "MARKET" && value.limitPrice !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["limitPrice"],
+        message: "市价单不能填写限价",
+      });
+    }
+  });
+
+const orderListSchema = z.object({
+  mode: z.enum(["VIRTUAL", "REAL"]).default("VIRTUAL"),
+  status: z.enum(["OPEN", "FILLED", "CANCELLED"]).optional(),
 });
 
 const registerSchema = z.object({
@@ -184,6 +224,8 @@ export interface ApplicationContext {
   runtime: VirtualMarketRuntime;
   aiRuntime: AITradingRuntime;
   aiTradingService: AITradingService;
+  llmTradingRuntime: LLMTradingRuntime | null;
+  llmTradingService: LLMTradingService | null;
   authService: AuthService;
   candleService: CandleService;
   marketDetailService: MarketDetailService;
@@ -216,6 +258,8 @@ export interface CreateApplicationOptions {
   realSyncEnabled?: boolean;
   realFetchImplementation?: typeof fetch;
   appUpdateDirectory?: string;
+  rootConfigPath?: string;
+  llmFetchImplementation?: typeof fetch;
 }
 
 export async function createApplication(
@@ -235,6 +279,10 @@ export async function createApplication(
   let repository = options.repository;
   let primaryConnection = options.databaseConnection;
   const clock = options.clock ?? (() => new Date());
+  const rootConfig = await loadRootConfig({ path: options.rootConfigPath });
+  if (rootConfig.state === "INVALID") {
+    console.warn(`LLM 智能交易配置无效，已安全停用：${rootConfig.error}`);
+  }
 
   if (!repository) {
     startupLog("opening virtual database");
@@ -309,12 +357,28 @@ export async function createApplication(
     fetchImplementation: options.realFetchImplementation,
     clock,
   });
+  const realTradingService = new RealTradingService(
+    realRepository,
+    realRuntimeConfig.quoteMaximumReceiveAgeMs,
+    clock,
+  );
   let loadController: SystemLoadController | null = null;
   const realRuntime = new RealMarketRuntime(
     realRepository,
     realProvider,
     realRuntimeConfig,
-    () => accountFeatureStore.realWatchlistPriorities(),
+    async () => {
+      const priorities = await accountFeatureStore.realWatchlistPriorities();
+      const openOrderInstrumentIds =
+        await realTradingService.listOpenOrderInstrumentIds();
+      for (const instrumentId of openOrderInstrumentIds) {
+        priorities.set(
+          instrumentId,
+          Math.max(priorities.get(instrumentId) ?? 0, 25_000),
+        );
+      }
+      return priorities;
+    },
     clock,
     () =>
       loadController?.getRealMarketSettings() ?? {
@@ -360,6 +424,26 @@ export async function createApplication(
     clock,
     engine,
   );
+  const llmTradingService = rootConfig.llmTrading
+    ? new LLMTradingService(
+        rootConfig.llmTrading,
+        new LlamaCppTradingClient(
+          rootConfig.llmTrading,
+          options.llmFetchImplementation,
+        ),
+        new RepositoryLLMTradingPort(
+          repository,
+          tradeService,
+          engine,
+          clock,
+        ),
+        clock,
+        options.random,
+      )
+    : null;
+  const llmTradingRuntime = llmTradingService
+    ? new LLMTradingRuntime(llmTradingService)
+    : null;
   const aiEnabled =
     options.aiEnabled ??
     (!options.repository &&
@@ -412,11 +496,6 @@ export async function createApplication(
     realRepository,
     realRuntime,
   );
-  const realTradingService = new RealTradingService(
-    realRepository,
-    realRuntimeConfig.quoteMaximumReceiveAgeMs,
-    clock,
-  );
   const rewardService = new RewardService(
     accountFeatureStore,
     repository,
@@ -424,6 +503,22 @@ export async function createApplication(
     realTradingService,
     clock,
   );
+  const unsubscribeVirtualOrderMatcher = runtime.subscribe((quotes) => {
+    void tradeService
+      .matchOpenOrders(quotes.map((quote) => quote.instrumentId))
+      .catch((error: unknown) => {
+        console.error("虚拟限价单撮合失败", error);
+      });
+  });
+  const unsubscribeRealOrderMatcher = realRuntime.subscribe((quotes) => {
+    void realTradingService
+      .matchOpenOrders(quotes.map((quote) => quote.instrumentId))
+      .catch((error: unknown) => {
+        console.error("真实行情限价单撮合失败", error);
+      });
+  });
+  await tradeService.matchOpenOrders();
+  await realTradingService.matchOpenOrders();
   // Periodic storage maintenance
   const virtualClient: PGlite | undefined = primaryConnection?.client;
   const realClient: PGlite | undefined = ownedRealConnection?.client;
@@ -533,6 +628,9 @@ export async function createApplication(
       accountModel: "SINGLE_USD_LEDGER",
       usdCnyRate: GAME_RULES.usdCnyDisplayRate,
       aiTrading: aiTradingService.getStatus(),
+      llmTrading: llmTradingService
+        ? llmTradingService.getStatus()
+        : { enabled: false, configurationState: rootConfig.state },
       chartSource: "DATABASE_RECORDED",
       realMarket: realRuntime.getStatus(),
       loadControl: loadController.getStatus(),
@@ -925,6 +1023,16 @@ export async function createApplication(
     data: aiTradingService.getStatus(),
   }));
 
+  app.get("/api/ai/llm/status", async () => ({
+    data: llmTradingService
+      ? llmTradingService.getStatus()
+      : {
+          enabled: false,
+          configurationState: rootConfig.state,
+          error: rootConfig.error,
+        },
+  }));
+
   app.get<{
     Querystring: { limit?: string };
     Reply: ApiEnvelope<AITraderRankingItem[]> | ApiError;
@@ -960,15 +1068,16 @@ export async function createApplication(
         message: "模拟盘类型无效",
       });
     }
-    return {
-      data:
-        parsed.data.mode === "REAL"
-          ? await realTradingService.getSnapshot(
-              account.id,
-              account.displayCurrency,
-            )
-          : portfolioService.getSnapshot(account.id),
-    };
+    if (parsed.data.mode === "REAL") {
+      return {
+        data: await realTradingService.getSnapshot(
+          account.id,
+          account.displayCurrency,
+        ),
+      };
+    }
+    await tradeService.settleDuePositions();
+    return { data: portfolioService.getSnapshot(account.id) };
   });
 
   app.get<{
@@ -1005,6 +1114,137 @@ export async function createApplication(
     return {
       data: repository.listTransactions(portfolio.id),
     };
+  });
+
+  app.get<{
+    Querystring: { mode?: MarketMode; status?: string };
+    Reply: ApiEnvelope<LimitOrder[]> | ApiError;
+  }>("/api/account/orders", async (request, reply) => {
+    const account = requireAccount(request, authService);
+    if (!account) {
+      return unauthorized(reply);
+    }
+    const parsed = orderListSchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_ORDER_QUERY",
+        message: "委托查询参数无效",
+      });
+    }
+    try {
+      return {
+        data:
+          parsed.data.mode === "REAL"
+            ? await realTradingService.listOrders(
+                account.id,
+                parsed.data.status,
+              )
+            : tradeService.listOrders(
+                account.id,
+                parsed.data.status,
+              ),
+      };
+    } catch (error) {
+      if (
+        error instanceof TradeError ||
+        error instanceof RealTradeError
+      ) {
+        return reply.status(error.statusCode).send({
+          code: error.code,
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{
+    Body: TradeRequest & { mode?: MarketMode };
+    Reply: ApiEnvelope<OrderSubmissionResult> | ApiError;
+  }>("/api/orders", async (request, reply) => {
+    const account = requireAccount(request, authService);
+    if (!account) {
+      return unauthorized(reply);
+    }
+    const parsed = orderSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_ORDER_REQUEST",
+        message:
+          parsed.error.issues[0]?.message ?? "委托参数无效",
+      });
+    }
+    try {
+      const { mode, ...orderRequest } = parsed.data;
+      return reply.status(201).send({
+        data:
+          mode === "REAL"
+            ? await realTradingService.placeOrder(
+                account.id,
+                account.displayCurrency,
+                orderRequest,
+              )
+            : await tradeService.placeOrder(
+                account.id,
+                orderRequest,
+              ),
+      });
+    } catch (error) {
+      if (
+        error instanceof TradeError ||
+        error instanceof RealTradeError
+      ) {
+        return reply.status(error.statusCode).send({
+          code: error.code,
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.delete<{
+    Params: { orderId: string };
+    Querystring: { mode?: MarketMode };
+    Reply: ApiEnvelope<OrderCancellationResult> | ApiError;
+  }>("/api/orders/:orderId", async (request, reply) => {
+    const account = requireAccount(request, authService);
+    if (!account) {
+      return unauthorized(reply);
+    }
+    const parsed = modeSchema.safeParse(request.query);
+    if (!parsed.success || !request.params.orderId.trim()) {
+      return reply.status(400).send({
+        code: "INVALID_ORDER_REQUEST",
+        message: "撤单参数无效",
+      });
+    }
+    try {
+      return {
+        data:
+          parsed.data.mode === "REAL"
+            ? await realTradingService.cancelOrder(
+                account.id,
+                account.displayCurrency,
+                request.params.orderId,
+              )
+            : await tradeService.cancelOrder(
+                account.id,
+                request.params.orderId,
+              ),
+      };
+    } catch (error) {
+      if (
+        error instanceof TradeError ||
+        error instanceof RealTradeError
+      ) {
+        return reply.status(error.statusCode).send({
+          code: error.code,
+          message: error.message,
+        });
+      }
+      throw error;
+    }
   });
 
   app.post<{
@@ -1335,7 +1575,10 @@ export async function createApplication(
     loadController.stop();
     runtime.stop();
     aiRuntime.stop();
+    await llmTradingRuntime?.stopAndWait();
     realRuntime.stop();
+    unsubscribeVirtualOrderMatcher();
+    unsubscribeRealOrderMatcher();
     await candleService.flush();
     await realRuntime.waitForStop();
 
@@ -1353,6 +1596,8 @@ export async function createApplication(
     runtime,
     aiRuntime,
     aiTradingService,
+    llmTradingRuntime,
+    llmTradingService,
     authService,
     candleService,
     marketDetailService,

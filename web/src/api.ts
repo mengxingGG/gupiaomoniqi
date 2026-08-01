@@ -6,9 +6,13 @@ import type {
   ChartSeries,
   DisplayCurrency,
   DailyCheckInStatus,
+  LimitOrder,
   MarketItem,
   MarketMode,
   OrderBookSnapshot,
+  OrderCancellationResult,
+  OrderStatus,
+  OrderSubmissionResult,
   PaginatedData,
   PortfolioSnapshot,
   PublicAccount,
@@ -203,6 +207,39 @@ export function executeTrade(
     method: "POST",
     body: JSON.stringify({ ...trade, mode }),
   });
+}
+
+export function submitOrder(
+  order: TradeRequest,
+  mode: MarketMode,
+): Promise<OrderSubmissionResult> {
+  return request<OrderSubmissionResult>("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ ...order, mode }),
+  });
+}
+
+export function fetchOrders(
+  mode: MarketMode,
+  status?: OrderStatus,
+): Promise<LimitOrder[]> {
+  const params = new URLSearchParams({ mode });
+
+  if (status) {
+    params.set("status", status);
+  }
+
+  return request<LimitOrder[]>(`/api/account/orders?${params}`);
+}
+
+export function cancelOrder(
+  orderId: string,
+  mode: MarketMode,
+): Promise<OrderCancellationResult> {
+  return request<OrderCancellationResult>(
+    `/api/orders/${encodeURIComponent(orderId)}?mode=${mode}`,
+    { method: "DELETE" },
+  );
 }
 
 export function marketSocketUrl(filter?: {

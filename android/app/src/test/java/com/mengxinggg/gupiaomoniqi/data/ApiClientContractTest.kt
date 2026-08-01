@@ -3,6 +3,10 @@ package com.mengxinggg.gupiaomoniqi.data
 import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
+import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
+import com.mengxinggg.gupiaomoniqi.model.OrderMode
+import com.mengxinggg.gupiaomoniqi.model.TradeRequest
+import com.mengxinggg.gupiaomoniqi.model.TradeSide
 import java.io.IOException
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -15,6 +19,79 @@ import org.junit.Test
 private const val TEST_BASE_URL = "http://10.0.2.2:3100"
 
 class ApiClientContractTest {
+    @Test
+    fun `limit order submission sends price and idempotency key to global order endpoint`() {
+        lateinit var recorded: HttpRequest
+        val client = ApiClient(
+            InMemoryTokenStore("token", TEST_BASE_URL),
+        ) { request ->
+            recorded = request
+            HttpResponse(
+                200,
+                """{"data":{"order":${openLimitOrderJson()},"transaction":null,"portfolio":${TestJson.portfolio}}}""",
+            )
+        }
+
+        val result = client.submitOrder(
+            MarketMode.REAL,
+            TradeRequest(
+                instrumentId = "us-aapl",
+                side = TradeSide.BUY,
+                quantity = 20,
+                orderMode = OrderMode.LIMIT,
+                limitPrice = 205.5,
+                idempotencyKey = "order-attempt-1",
+            ),
+        )
+
+        assertEquals("POST", recorded.method)
+        assertEquals("$TEST_BASE_URL/api/orders", recorded.url)
+        assertEquals("Bearer token", recorded.headers["Authorization"])
+        val body = JSONObject(recorded.body!!)
+        assertEquals("REAL", body.getString("mode"))
+        assertEquals("LIMIT", body.getString("orderMode"))
+        assertEquals(205.5, body.getDouble("limitPrice"), 0.0001)
+        assertEquals("order-attempt-1", body.getString("idempotencyKey"))
+        assertEquals(LimitOrderStatus.OPEN, result.order.status)
+        assertNull(result.transaction)
+    }
+
+    @Test
+    fun `order list filter and cancellation use mode query parameters`() {
+        val requests = mutableListOf<HttpRequest>()
+        val client = ApiClient(
+            InMemoryTokenStore("token", TEST_BASE_URL),
+        ) { request ->
+            requests += request
+            if (request.method == "GET") {
+                HttpResponse(200, """{"data":[${openLimitOrderJson()}]}""")
+            } else {
+                val cancelled = openLimitOrderJson()
+                    .replace("\"status\":\"OPEN\"", "\"status\":\"CANCELLED\"")
+                    .replace("\"cancelledAt\":null", "\"cancelledAt\":\"2026-08-01T02:10:00.000Z\"")
+                HttpResponse(
+                    200,
+                    """{"data":{"order":$cancelled,"portfolio":${TestJson.portfolio}}}""",
+                )
+            }
+        }
+
+        client.orders(MarketMode.REAL, LimitOrderStatus.OPEN)
+        val cancellation = client.cancelOrder(MarketMode.REAL, "order/1")
+
+        assertEquals(
+            "$TEST_BASE_URL/api/account/orders?mode=REAL&status=OPEN",
+            requests[0].url,
+        )
+        assertEquals("DELETE", requests[1].method)
+        assertEquals(
+            "$TEST_BASE_URL/api/orders/order%2F1?mode=REAL",
+            requests[1].url,
+        )
+        assertNull(requests[1].body)
+        assertEquals(LimitOrderStatus.CANCELLED, cancellation.order.status)
+    }
+
     @Test
     fun `Android update check is public GET with current version code`() {
         lateinit var recorded: HttpRequest
@@ -445,3 +522,30 @@ class ApiClientContractTest {
         assertEquals("", client.baseUrl)
     }
 }
+
+internal fun openLimitOrderJson(): String =
+    """
+    {
+      "id":"order/1",
+      "mode":"REAL",
+      "instrumentId":"us-aapl",
+      "symbol":"AAPL",
+      "name":"苹果",
+      "market":"US",
+      "side":"BUY",
+      "orderMode":"LIMIT",
+      "status":"OPEN",
+      "quantity":20,
+      "filledQuantity":0,
+      "limitPrice":205.5,
+      "quoteCurrency":"USD",
+      "reservedCashUsd":4111.23,
+      "reservedQuantity":0,
+      "actorType":"USER",
+      "createdAt":"2026-08-01T02:00:00.000Z",
+      "updatedAt":"2026-08-01T02:00:00.000Z",
+      "filledAt":null,
+      "cancelledAt":null,
+      "transactionId":null
+    }
+    """.trimIndent()

@@ -12,6 +12,86 @@ import { PortfolioService } from "../src/services/PortfolioService.js";
 import { TradeService } from "../src/services/TradeService.js";
 
 describe("DatabaseGameRepository", () => {
+  it("并发奖励入账不会被使用旧快照的交易覆盖", async () => {
+    const client = new PGlite();
+    await client.waitReady;
+    const connection = {
+      client,
+      db: drizzle({ client, schema }),
+    };
+
+    try {
+      await migrateDatabase(client);
+      await seedDatabase(client);
+      const repository = await DatabaseGameRepository.create(connection);
+      const clock = () => new Date("2026-07-27T12:00:00.000Z");
+      const auth = await new AuthService(repository, clock).register({
+        username: "cash_race_trader",
+        displayName: "并发资金测试员",
+        password: "ValidPass123",
+      });
+      const portfolioService = new PortfolioService(repository);
+      const tradeService = new TradeService(
+        repository,
+        portfolioService,
+        clock,
+      );
+
+      const originalCommitTrade = repository.commitTrade.bind(repository);
+      let signalCommitStarted!: () => void;
+      const commitStarted = new Promise<void>((resolve) => {
+        signalCommitStarted = resolve;
+      });
+      let releaseCommit!: () => void;
+      const commitGate = new Promise<void>((resolve) => {
+        releaseCommit = resolve;
+      });
+      repository.commitTrade = async (commit) => {
+        signalCommitStarted();
+        await commitGate;
+        await originalCommitTrade(commit);
+      };
+
+      const trade = tradeService.execute(auth.account.id, {
+        instrumentId: "cn-600519",
+        side: "BUY",
+        quantity: 100,
+      });
+      await commitStarted;
+      await repository.creditCashAdjustment(
+        auth.account.id,
+        "concurrent-reward-claim",
+        100_000,
+        "并发奖励回归",
+      );
+      releaseCommit();
+      await trade;
+
+      const portfolio = repository.getPortfolioByAccountId(
+        auth.account.id,
+      );
+      expect(portfolio).toMatchObject({
+        initialCashUsd: 1_100_000,
+        availableCashUsd: 1_072_991.9,
+      });
+      const persisted = await client.query<{
+        initial_cash_usd: number;
+        available_cash_usd: number;
+      }>(
+        `SELECT initial_cash_usd::float8, available_cash_usd::float8
+           FROM portfolios
+          WHERE id = $1`,
+        [portfolio!.id],
+      );
+      expect(persisted.rows[0]).toEqual({
+        initial_cash_usd: 1_100_000,
+        available_cash_usd: 1_072_991.9,
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("在同一数据库事务中保存美元账本、持仓、成交和幂等键", async () => {
     const client = new PGlite();
     await client.waitReady;
@@ -100,12 +180,24 @@ describe("DatabaseGameRepository", () => {
         new PortfolioService(reloaded),
         clock,
       );
-      await reloadedTradeService.settleDuePositions(now);
+      const concurrentSettlements = await Promise.all([
+        reloaded.settleDuePositions(now.toISOString()),
+        reloaded.settleDuePositions(now.toISOString()),
+      ]);
+      expect(
+        concurrentSettlements
+          .flat()
+          .reduce((sum, item) => sum + item.quantity, 0),
+      ).toBe(100);
       expect(
         reloaded.getPosition(portfolio!.id, "cn-600519"),
       ).toMatchObject({
         availableQuantity: 100,
       });
+      await reloadedTradeService.settleDuePositions(now);
+      expect(
+        reloaded.getPosition(portfolio!.id, "cn-600519"),
+      ).toMatchObject({ availableQuantity: 100 });
     } finally {
       await client.close();
     }

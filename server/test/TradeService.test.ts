@@ -4,6 +4,133 @@ import { TradeError } from "../src/services/TradeService.js";
 import { createTestHarness } from "./helpers.js";
 
 describe("TradeService", () => {
+  it("限价买单冻结资金，撤单后完整释放", async () => {
+    const { accountId, repository, tradeService } =
+      await createTestHarness();
+    const placed = await tradeService.placeOrder(accountId!, {
+      instrumentId: "us-aapl",
+      side: "BUY",
+      quantity: 10,
+      orderMode: "LIMIT",
+      limitPrice: 110,
+      idempotencyKey: "limit-buy-open-001",
+    });
+
+    expect(placed.order).toMatchObject({
+      status: "OPEN",
+      limitPrice: 110,
+      reservedCashUsd: 1_101,
+    });
+    expect(placed.portfolio).toMatchObject({
+      availableCashUsd: 998_899,
+      frozenCashUsd: 1_101,
+    });
+    expect(repository.listTransactions(
+      repository.getPortfolioByAccountId(accountId!)!.id,
+    )).toHaveLength(0);
+
+    const cancelled = await tradeService.cancelOrder(
+      accountId!,
+      placed.order.id,
+    );
+    expect(cancelled.order.status).toBe("CANCELLED");
+    expect(cancelled.portfolio.availableCashUsd).toBe(1_000_000);
+    expect(cancelled.portfolio.frozenCashUsd).toBe(0);
+  });
+
+  it("穿价限价单按更优现价立即成交且不留冻结", async () => {
+    const { accountId, tradeService } = await createTestHarness();
+    const result = await tradeService.placeOrder(accountId!, {
+      instrumentId: "us-aapl",
+      side: "BUY",
+      quantity: 10,
+      orderMode: "LIMIT",
+      limitPrice: 130,
+      idempotencyKey: "limit-buy-cross-001",
+    });
+
+    expect(result.order).toMatchObject({
+      status: "FILLED",
+      filledQuantity: 10,
+      reservedCashUsd: 0,
+    });
+    expect(result.transaction?.quotePrice).toBe(120);
+    expect(result.portfolio.frozenCashUsd).toBe(0);
+    expect(result.portfolio.positions[0]?.quantity).toBe(10);
+  });
+
+  it("限价卖单冻结可卖股数，撤单恢复可卖持仓", async () => {
+    const { accountId, tradeService } = await createTestHarness();
+    await tradeService.execute(accountId!, {
+      instrumentId: "us-aapl",
+      side: "BUY",
+      quantity: 20,
+    });
+    const placed = await tradeService.placeOrder(accountId!, {
+      instrumentId: "us-aapl",
+      side: "SELL",
+      quantity: 10,
+      orderMode: "LIMIT",
+      limitPrice: 130,
+      idempotencyKey: "limit-sell-open-001",
+    });
+    expect(placed.portfolio.positions[0]).toMatchObject({
+      quantity: 20,
+      availableQuantity: 10,
+      frozenQuantity: 10,
+    });
+
+    const cancelled = await tradeService.cancelOrder(
+      accountId!,
+      placed.order.id,
+    );
+    expect(cancelled.portfolio.positions[0]).toMatchObject({
+      quantity: 20,
+      availableQuantity: 20,
+      frozenQuantity: 0,
+    });
+  });
+
+  it("行情穿过限价后撮合一次并退还买单差价", async () => {
+    const { accountId, repository, tradeService } =
+      await createTestHarness();
+    const placed = await tradeService.placeOrder(accountId!, {
+      instrumentId: "us-aapl",
+      side: "BUY",
+      quantity: 10,
+      orderMode: "LIMIT",
+      limitPrice: 110,
+      idempotencyKey: "limit-buy-trigger-001",
+    });
+    const quote = repository.getQuote("us-aapl")!;
+    await repository.saveQuotes([
+      {
+        ...quote,
+        currentPrice: 105,
+        lowPrice: 105,
+        changeAmount: -15,
+        changePercent: -12.5,
+      },
+    ]);
+
+    await expect(
+      tradeService.matchOpenOrders(["us-aapl"]),
+    ).resolves.toBe(1);
+    await expect(
+      tradeService.matchOpenOrders(["us-aapl"]),
+    ).resolves.toBe(0);
+    const order = tradeService.listOrders(accountId!)[0];
+    expect(order).toMatchObject({
+      id: placed.order.id,
+      status: "FILLED",
+      filledQuantity: 10,
+    });
+    const snapshot = repository.getPortfolioByAccountId(accountId!)!;
+    expect(snapshot.frozenCashUsd).toBe(0);
+    expect(snapshot.availableCashUsd).toBe(998_949);
+    expect(repository.listTransactions(snapshot.id)).toHaveLength(1);
+  });
+
   it("AI 批处理可复用轮首结算而不为每笔交易重复结算", async () => {
     const { accountId, repository, tradeService } =
       await createTestHarness();
@@ -200,6 +327,30 @@ describe("TradeService", () => {
         side: "BUY",
         quantity: 2,
         idempotencyKey: "conflicting-request-key",
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<TradeError>>({
+        code: "IDEMPOTENCY_KEY_REUSED",
+      }),
+    );
+  });
+
+  it("拒绝把交易接口的幂等键跨接口复用于委托", async () => {
+    const { accountId, tradeService } = await createTestHarness();
+    await tradeService.execute(accountId!, {
+      instrumentId: "us-aapl",
+      side: "BUY",
+      quantity: 1,
+      idempotencyKey: "cross-endpoint-request-key",
+    });
+
+    await expect(
+      tradeService.placeOrder(accountId!, {
+        instrumentId: "us-aapl",
+        side: "BUY",
+        quantity: 1,
+        orderMode: "MARKET",
+        idempotencyKey: "cross-endpoint-request-key",
       }),
     ).rejects.toEqual(
       expect.objectContaining<Partial<TradeError>>({

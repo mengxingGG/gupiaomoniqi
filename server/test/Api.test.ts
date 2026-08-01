@@ -15,6 +15,57 @@ afterEach(async () => {
 });
 
 describe("HTTP API", () => {
+  it("限价委托 API 支持挂单、查询和撤单", async () => {
+    const { repository } = await createTestHarness({
+      registerAccount: false,
+    });
+    context = await createApplication({ repository });
+    const registration = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/register",
+      payload: {
+        username: "limit_api_user",
+        displayName: "限价用户",
+        password: "ValidPass123",
+      },
+    });
+    const authorization = {
+      authorization: `Bearer ${registration.json().data.token as string}`,
+    };
+    const placed = await context.app.inject({
+      method: "POST",
+      url: "/api/orders",
+      headers: authorization,
+      payload: {
+        mode: "VIRTUAL",
+        instrumentId: "us-aapl",
+        side: "BUY",
+        quantity: 10,
+        orderMode: "LIMIT",
+        limitPrice: 110,
+        idempotencyKey: "api-limit-order-001",
+      },
+    });
+    expect(placed.statusCode).toBe(201);
+    expect(placed.json().data.order.status).toBe("OPEN");
+    expect(placed.json().data.transaction).toBeUndefined();
+
+    const listed = await context.app.inject({
+      method: "GET",
+      url: "/api/account/orders?mode=VIRTUAL&status=OPEN",
+      headers: authorization,
+    });
+    expect(listed.json().data).toHaveLength(1);
+    const cancelled = await context.app.inject({
+      method: "DELETE",
+      url: `/api/orders/${placed.json().data.order.id}?mode=VIRTUAL`,
+      headers: authorization,
+    });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json().data.order.status).toBe("CANCELLED");
+    expect(cancelled.json().data.portfolio.frozenCashUsd).toBe(0);
+  });
+
   it("行情与股票专业图表可匿名浏览，账户接口要求登录", async () => {
     const { repository } = await createTestHarness({
       registerAccount: false,

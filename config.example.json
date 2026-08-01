@@ -1,0 +1,17 @@
+{
+  "llmTrading": {
+    "enabled": false,
+    "baseUrl": "http://127.0.0.1:8080/v1",
+    "modelId": "your-llama-cpp-model-id",
+    "apiKey": "",
+    "agentCount": 10,
+    "contextWindow": 32768,
+    "requestTimeoutMs": 300000,
+    "decisionIntervalMs": 60000,
+    "maxConcurrency": 1,
+    "maxOutputTokens": 512,
+    "temperature": 0.35,
+    "circuitBackoffMs": 60000,
+    "circuitMaximumBackoffMs": 300000
+  }
+}

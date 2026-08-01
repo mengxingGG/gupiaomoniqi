@@ -23,6 +23,154 @@ afterEach(async () => {
   }
 });
 
+describe("real market database migrations", () => {
+  it("upgrades a legacy portfolio without losing cash or positions", async () => {
+    const client = new PGlite();
+    openClients.push(client);
+    await client.waitReady;
+    await client.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE real_instruments (
+        id TEXT PRIMARY KEY,
+        provider_sec_id TEXT NOT NULL UNIQUE,
+        symbol TEXT NOT NULL,
+        name TEXT NOT NULL,
+        market TEXT NOT NULL CHECK (market IN ('CN', 'HK', 'US', 'UK')),
+        source_currency TEXT NOT NULL
+          CHECK (source_currency IN ('CNY', 'HKD', 'USD', 'GBP')),
+        quote_currency TEXT NOT NULL CHECK (quote_currency IN ('CNY', 'USD')),
+        exchange_code TEXT NOT NULL,
+        industry TEXT NOT NULL DEFAULT '',
+        lot_size INTEGER NOT NULL CHECK (lot_size > 0),
+        settlement_cycle TEXT NOT NULL CHECK (settlement_cycle IN ('T0', 'T1')),
+        is_tradable BOOLEAN NOT NULL DEFAULT true,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        source_page INTEGER NOT NULL CHECK (source_page > 0),
+        source_rank INTEGER NOT NULL CHECK (source_rank >= 0),
+        last_seen_sweep_id TEXT,
+        source_updated_at TIMESTAMPTZ NOT NULL,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE real_portfolios (
+        id UUID PRIMARY KEY,
+        account_id TEXT NOT NULL UNIQUE,
+        initial_cash_usd DOUBLE PRECISION NOT NULL,
+        available_cash_usd DOUBLE PRECISION NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE real_positions (
+        id UUID PRIMARY KEY,
+        portfolio_id UUID NOT NULL
+          REFERENCES real_portfolios(id) ON DELETE CASCADE,
+        instrument_id TEXT NOT NULL REFERENCES real_instruments(id),
+        quantity INTEGER NOT NULL CHECK (quantity >= 0),
+        available_quantity INTEGER NOT NULL CHECK (available_quantity >= 0),
+        average_cost_usd DOUBLE PRECISION NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (portfolio_id, instrument_id)
+      );
+
+      INSERT INTO schema_migrations (version) VALUES (1), (2);
+      INSERT INTO real_instruments (
+        id, provider_sec_id, symbol, name, market, source_currency,
+        quote_currency, exchange_code, lot_size, settlement_cycle,
+        source_page, source_rank, source_updated_at
+      ) VALUES (
+        'legacy-aapl', '105.AAPL', 'AAPL', 'Apple', 'US', 'USD',
+        'USD', '105', 1, 'T0', 1, 0, '2026-07-28T12:00:00.000Z'
+      );
+      INSERT INTO real_portfolios (
+        id, account_id, initial_cash_usd, available_cash_usd
+      ) VALUES (
+        '11111111-1111-4111-8111-111111111111',
+        'legacy-account', 1000000, 876543.21
+      );
+      INSERT INTO real_positions (
+        id, portfolio_id, instrument_id, quantity,
+        available_quantity, average_cost_usd
+      ) VALUES (
+        '22222222-2222-4222-8222-222222222222',
+        '11111111-1111-4111-8111-111111111111',
+        'legacy-aapl', 123, 120, 98.76
+      );
+    `);
+
+    await migrateRealDatabase(client);
+    await migrateRealDatabase(client);
+
+    const upgraded = await client.query<{
+      account_id: string;
+      initial_cash_usd: number;
+      available_cash_usd: number;
+      frozen_cash_usd: number;
+      quantity: number;
+      available_quantity: number;
+      frozen_quantity: number;
+      average_cost_usd: number;
+    }>(`
+      SELECT portfolio.account_id,
+             portfolio.initial_cash_usd,
+             portfolio.available_cash_usd,
+             portfolio.frozen_cash_usd,
+             position.quantity,
+             position.available_quantity,
+             position.frozen_quantity,
+             position.average_cost_usd
+        FROM real_portfolios portfolio
+        JOIN real_positions position
+          ON position.portfolio_id = portfolio.id
+       WHERE portfolio.account_id = 'legacy-account'
+    `);
+    expect(upgraded.rows).toEqual([
+      {
+        account_id: "legacy-account",
+        initial_cash_usd: 1_000_000,
+        available_cash_usd: 876_543.21,
+        frozen_cash_usd: 0,
+        quantity: 123,
+        available_quantity: 120,
+        frozen_quantity: 0,
+        average_cost_usd: 98.76,
+      },
+    ]);
+
+    const columns = await client.query<{
+      table_name: string;
+      column_name: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(`
+      SELECT table_name, column_name, is_nullable, column_default
+        FROM information_schema.columns
+       WHERE (table_name = 'real_portfolios'
+              AND column_name = 'frozen_cash_usd')
+          OR (table_name = 'real_positions'
+              AND column_name = 'frozen_quantity')
+       ORDER BY table_name, column_name
+    `);
+    expect(columns.rows).toHaveLength(2);
+    expect(columns.rows.every((column) => column.is_nullable === "NO")).toBe(
+      true,
+    );
+    expect(columns.rows.every((column) => column.column_default !== null)).toBe(
+      true,
+    );
+
+    const versions = await client.query<{ version: number }>(
+      `SELECT version FROM schema_migrations ORDER BY version`,
+    );
+    expect(versions.rows.map(({ version }) => version)).toEqual([1, 2, 3, 4]);
+  });
+});
+
 describe("真实行情完整模块", () => {
   it("真实列表请求不携带 timil 参数，避免中间分页被打空", async () => {
     let requestedUrl: URL | null = null;
@@ -994,6 +1142,24 @@ describe("真实行情完整模块", () => {
       expect(trade.json().data.portfolio.mode).toBe("REAL");
       expect(trade.json().data.portfolio.positions[0].quantity).toBe(10);
 
+      const reusedTradeKey = await context.app.inject({
+        method: "POST",
+        url: "/api/orders",
+        headers,
+        payload: {
+          mode: "REAL",
+          instrumentId: "real-us-105-aapl",
+          side: "BUY",
+          quantity: 10,
+          orderMode: "MARKET",
+          idempotencyKey: "real-aapl-buy-001",
+        },
+      });
+      expect(reusedTradeKey.statusCode).toBe(409);
+      expect(reusedTradeKey.json().code).toBe(
+        "IDEMPOTENCY_KEY_REUSED",
+      );
+
       const checkIn = await context.app.inject({
         method: "POST",
         url: "/api/rewards/check-in",
@@ -1067,6 +1233,109 @@ describe("真实行情完整模块", () => {
       expect(realAfter.json().data.availableCashUsd).toBeLessThan(
         3_200_000,
       );
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("真实行情限价单冻结资金并在新报价穿价后成交", async () => {
+    const now = new Date("2026-07-28T12:00:00.000Z");
+    const virtual = await createTestHarness({
+      registerAccount: false,
+      clock: () => now,
+    });
+    const { repository: realRepository } = await createRealRepository();
+    await realRepository.upsertProviderPage(
+      providerPage(now.toISOString()),
+      "limit-seed",
+    );
+    const context = await createApplication({
+      repository: virtual.repository,
+      realRepository,
+      realSyncEnabled: false,
+      aiEnabled: false,
+      clock: () => now,
+    });
+    try {
+      const registration = await context.app.inject({
+        method: "POST",
+        url: "/api/auth/register",
+        payload: {
+          username: "real_limit_trader",
+          displayName: "真实限价测试员",
+          password: "ValidPass123",
+        },
+      });
+      const headers = {
+        authorization: `Bearer ${registration.json().data.token as string}`,
+      };
+      const placed = await context.app.inject({
+        method: "POST",
+        url: "/api/orders",
+        headers,
+        payload: {
+          mode: "REAL",
+          instrumentId: "real-us-105-aapl",
+          side: "BUY",
+          quantity: 10,
+          orderMode: "LIMIT",
+          limitPrice: 90,
+          idempotencyKey: "real-limit-buy-001",
+        },
+      });
+      expect(placed.statusCode).toBe(201);
+      expect(placed.json().data.order.status).toBe("OPEN");
+      expect(placed.json().data.portfolio.frozenCashUsd).toBe(901);
+
+      now.setMinutes(now.getMinutes() + 3);
+      const retriedAfterQuoteExpired = await context.app.inject({
+        method: "POST",
+        url: "/api/orders",
+        headers,
+        payload: {
+          mode: "REAL",
+          instrumentId: "real-us-105-aapl",
+          side: "BUY",
+          quantity: 10,
+          orderMode: "LIMIT",
+          limitPrice: 90,
+          idempotencyKey: "real-limit-buy-001",
+        },
+      });
+      expect(retriedAfterQuoteExpired.statusCode).toBe(201);
+      expect(retriedAfterQuoteExpired.json().data.order.id).toBe(
+        placed.json().data.order.id,
+      );
+
+      const page = providerPage(now.toISOString());
+      page.items[0]!.quote!.currentPrice = 85;
+      page.items[0]!.quote!.lowPrice = 85;
+      page.items[0]!.quote!.changeAmount = -13;
+      page.items[0]!.quote!.changePercent = -13.265306;
+      await realRepository.upsertProviderPage(page, "limit-cross");
+      await expect(
+        context.realTradingService.matchOpenOrders([
+          "real-us-105-aapl",
+        ]),
+      ).resolves.toBe(1);
+
+      const listed = await context.app.inject({
+        method: "GET",
+        url: "/api/account/orders?mode=REAL",
+        headers,
+      });
+      const account = await context.app.inject({
+        method: "GET",
+        url: "/api/account?mode=REAL",
+        headers,
+      });
+      expect(listed.json().data[0]).toMatchObject({
+        status: "FILLED",
+        filledQuantity: 10,
+      });
+      expect(account.json().data.frozenCashUsd).toBe(0);
+      expect(account.json().data.availableCashUsd).toBe(999_149);
+      expect(account.json().data.positions[0].quantity).toBe(10);
     } finally {
       await context.app.close();
     }

@@ -222,6 +222,7 @@ fun StockSimulatorApp() {
                                 onOpenStock = viewModel::openStock,
                                 onCheckIn = viewModel::claimCheckIn,
                                 onRedeemGift = viewModel::redeemGiftCode,
+                                onCancelOrder = viewModel::cancelOrder,
                                 modifier = Modifier.padding(innerPadding),
                             )
                         }
@@ -234,6 +235,8 @@ fun StockSimulatorApp() {
             TradeSheet(
                 state = state,
                 onDismiss = viewModel::dismissTradeSheet,
+                onOrderModeChange = viewModel::updateOrderMode,
+                onLimitPriceChange = viewModel::updateLimitPrice,
                 onLotsChange = viewModel::updateTradeLots,
                 onPercentage = viewModel::selectTradePercentage,
                 onSubmit = viewModel::submitTrade,

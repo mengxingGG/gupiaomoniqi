@@ -14,6 +14,8 @@ import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
+import com.mengxinggg.gupiaomoniqi.model.LimitOrder
+import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
 import com.mengxinggg.gupiaomoniqi.model.OrderBook
 import com.mengxinggg.gupiaomoniqi.model.OrderBookLevel
 import com.mengxinggg.gupiaomoniqi.model.OrderMode
@@ -25,7 +27,6 @@ import com.mengxinggg.gupiaomoniqi.model.TradeSide
 import com.mengxinggg.gupiaomoniqi.model.Transaction
 import com.mengxinggg.gupiaomoniqi.model.Watchlist
 import java.util.UUID
-import kotlin.math.floor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -39,8 +40,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private const val MARKET_PAGE_SIZE = 30
-private const val TRADE_FEE_RATE = 0.0003
-private const val MINIMUM_TRADE_FEE_USD = 1.0
 private const val REAL_REFRESH_INTERVAL_MS = 2_000L
 private const val VIRTUAL_REFRESH_INTERVAL_MS = 3_000L
 
@@ -62,6 +61,11 @@ private data class PendingTrade(
     val side: UiTradeSide,
 )
 
+private data class InstrumentIdentity(
+    val market: String,
+    val symbol: String,
+)
+
 private data class SilentDetailRefresh(
     val item: MarketItem,
     val orderBook: OrderBook?,
@@ -69,6 +73,13 @@ private data class SilentDetailRefresh(
     val sessionError: Throwable?,
     val chart: List<CandleUi>?,
     val chartNotice: String?,
+)
+
+private data class AccountSnapshot(
+    val portfolio: Portfolio,
+    val transactions: List<Transaction>,
+    val orders: List<LimitOrder>,
+    val checkIn: DailyCheckInStatus,
 )
 
 class AppViewModel(
@@ -89,6 +100,7 @@ class AppViewModel(
     private var searchJob: Job? = null
     private var detailJob: Job? = null
     private var chartJob: Job? = null
+    private var modeMappingJob: Job? = null
     private var authJob: Job? = null
     private var tradeJob: Job? = null
     private var liveRefreshJob: Job? = null
@@ -104,7 +116,10 @@ class AppViewModel(
     private var watchlistRequestId = 0L
     private var accountRequestId = 0L
     private var transactionsRequestId = 0L
+    private var ordersRequestId = 0L
     private var settingsRequestId = 0L
+    private var modeMappingRequestId = 0L
+    private var portfolioMutationEpoch = 0L
 
     init {
         if (initialServerUrl.isNotBlank()) {
@@ -155,13 +170,27 @@ class AppViewModel(
     fun changeMode(mode: UiMarketMode) {
         val current = _uiState.value
         if (current.mode == mode) return
-        if (current.tradeBusy || current.rewardBusy) {
+        if (current.tradeBusy || current.rewardBusy || current.cancellingOrderId != null) {
             _uiState.update {
                 it.copy(transientMessage = "请等待当前操作完成后再切换模拟盘。")
             }
             return
         }
-        val selectedId = current.selectedInstrumentId
+        val selectedIdentity = current.selectedStock
+            ?.let { InstrumentIdentity(it.market, it.symbol) }
+            ?: current.selectedInstrumentId?.let { selectedId ->
+                (current.marketItems + current.watchlistItems)
+                    .firstOrNull { it.id == selectedId }
+                    ?.let { InstrumentIdentity(it.market, it.symbol) }
+            }
+        modeMappingJob?.cancel()
+        modeMappingRequestId += 1
+        if (current.screen == AppScreen.DETAIL) {
+            detailJob?.cancel()
+            chartJob?.cancel()
+            detailRequestId += 1
+            chartRequestId += 1
+        }
         _uiState.update {
             it.copy(
                 mode = mode,
@@ -171,11 +200,15 @@ class AppViewModel(
                 marketError = null,
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
+                selectedInstrumentId = null,
                 selectedStock = null,
                 candles = emptyList(),
                 orderBook = null,
                 portfolio = null,
                 transactions = emptyList(),
+                orders = emptyList(),
+                detailLoading = current.screen == AppScreen.DETAIL && selectedIdentity != null,
+                chartLoading = current.screen == AppScreen.DETAIL && selectedIdentity != null,
                 detailError = null,
                 accountError = null,
                 tradeSheet = null,
@@ -186,14 +219,93 @@ class AppViewModel(
             loadWatchlist()
             if (_uiState.value.selectedTab == MainTab.ASSETS) loadAccountData()
         }
-        if (current.screen == AppScreen.DETAIL && selectedId != null) {
-            openStock(selectedId)
+        if (current.screen == AppScreen.DETAIL) {
+            if (selectedIdentity == null) {
+                returnToMarketAfterModeSwitch("无法识别当前股票，已返回行情列表。")
+            } else {
+                resolveInstrumentAfterModeChange(mode, selectedIdentity)
+            }
+        }
+    }
+
+    private fun resolveInstrumentAfterModeChange(
+        mode: UiMarketMode,
+        identity: InstrumentIdentity,
+    ) {
+        val market = Market.entries.firstOrNull {
+            it.name.equals(identity.market, ignoreCase = true)
+        }
+        if (market == null) {
+            returnToMarketAfterModeSwitch("当前股票所属市场无法映射，已返回行情列表。")
+            return
+        }
+        val requestId = modeMappingRequestId
+        val requestServerEpoch = serverEpoch
+        modeMappingJob = viewModelScope.launch {
+            val page = try {
+                repository.getMarket(
+                    MarketQuery(
+                        mode = mode.toModel(),
+                        market = market,
+                        search = identity.symbol,
+                        page = 1,
+                        pageSize = 300,
+                    ),
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                null
+            }
+            val current = _uiState.value
+            if (
+                requestId != modeMappingRequestId ||
+                requestServerEpoch != serverEpoch ||
+                current.mode != mode ||
+                current.screen != AppScreen.DETAIL
+            ) {
+                return@launch
+            }
+            val mapped = page?.items?.let {
+                findModeMappedInstrument(it, identity.market, identity.symbol)
+            }
+            if (mapped == null) {
+                returnToMarketAfterModeSwitch(
+                    "${identity.market} · ${identity.symbol} 在当前模拟盘中不存在，已返回行情列表。",
+                )
+                return@launch
+            }
+            _uiState.update { it.copy(selectedStock = mapped.toUi()) }
+            openStock(mapped.instrument.id)
+        }
+    }
+
+    private fun returnToMarketAfterModeSwitch(message: String) {
+        _uiState.update {
+            it.copy(
+                screen = AppScreen.MAIN,
+                selectedTab = MainTab.MARKET,
+                selectedInstrumentId = null,
+                selectedStock = null,
+                detailLoading = false,
+                chartLoading = false,
+                candles = emptyList(),
+                orderBook = null,
+                tradeSheet = null,
+                detailError = null,
+                transientMessage = message,
+            )
         }
     }
 
     fun changeDisplayCurrency(currency: UiDisplayCurrency) {
         if (_uiState.value.displayCurrency == currency) return
-        _uiState.update { it.copy(displayCurrency = currency) }
+        _uiState.update {
+            it.copy(
+                displayCurrency = currency,
+                tradeSheet = it.tradeSheet?.convertLimitDisplayCurrency(currency),
+            )
+        }
         if (_uiState.value.account == null) return
         val requestEpoch = sessionEpoch
         viewModelScope.launch {
@@ -434,6 +546,7 @@ class AppViewModel(
                 watchlistRequestId += 1
                 accountRequestId += 1
                 transactionsRequestId += 1
+                ordersRequestId += 1
                 pendingTrade = null
                 giftAttempt = null
                 activeTradeAttemptId = null
@@ -451,6 +564,7 @@ class AppViewModel(
                         sessionRestoring = false,
                         portfolio = null,
                         transactions = emptyList(),
+                        orders = emptyList(),
                         watchlistIds = emptySet(),
                         watchlistItems = emptyList(),
                         checkIn = null,
@@ -462,6 +576,7 @@ class AppViewModel(
                         orderBook = null,
                         tradeSheet = null,
                         tradeBusy = false,
+                        cancellingOrderId = null,
                         rewardBusy = false,
                         accountLoading = false,
                         marketItems = emptyList(),
@@ -551,7 +666,7 @@ class AppViewModel(
 
     fun logout() {
         val state = _uiState.value
-        if (state.tradeBusy || state.rewardBusy) {
+        if (state.tradeBusy || state.rewardBusy || state.cancellingOrderId != null) {
             _uiState.update {
                 it.copy(transientMessage = "请等待当前操作完成后再退出。")
             }
@@ -567,6 +682,7 @@ class AppViewModel(
                 sessionRestoring = true,
                 portfolio = null,
                 transactions = emptyList(),
+                orders = emptyList(),
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,
@@ -576,6 +692,7 @@ class AppViewModel(
                 rewardBusy = false,
                 tradeSheet = null,
                 tradeBusy = false,
+                cancellingOrderId = null,
                 transientMessage = "已退出登录。",
             )
         }
@@ -782,7 +899,27 @@ class AppViewModel(
         _uiState.update { state ->
             val sheet = state.tradeSheet ?: return@update state
             state.copy(
-                tradeSheet = sheet.copy(lots = lots.coerceIn(0, sheet.maxLots)),
+                tradeSheet = sheet.changeLots(lots),
+                tradeError = null,
+            )
+        }
+    }
+
+    fun updateOrderMode(mode: UiOrderMode) {
+        _uiState.update { state ->
+            val sheet = state.tradeSheet ?: return@update state
+            state.copy(
+                tradeSheet = sheet.changeOrderMode(mode, state.portfolio),
+                tradeError = null,
+            )
+        }
+    }
+
+    fun updateLimitPrice(raw: String) {
+        _uiState.update { state ->
+            val sheet = state.tradeSheet ?: return@update state
+            state.copy(
+                tradeSheet = sheet.changeLimitPrice(raw, state.portfolio),
                 tradeError = null,
             )
         }
@@ -791,12 +928,10 @@ class AppViewModel(
     fun selectTradePercentage(percent: Int) {
         _uiState.update { state ->
             val sheet = state.tradeSheet ?: return@update state
-            val lots = when {
-                sheet.maxLots <= 0 -> 0
-                percent >= 100 -> sheet.maxLots
-                else -> floor(sheet.maxLots * (percent / 100.0)).toInt().coerceAtLeast(1)
-            }
-            state.copy(tradeSheet = sheet.copy(lots = lots), tradeError = null)
+            state.copy(
+                tradeSheet = sheet.selectPercentage(percent, state.portfolio),
+                tradeError = null,
+            )
         }
     }
 
@@ -820,22 +955,27 @@ class AppViewModel(
         val attemptId = sheet.idempotencyKey
         val quantity = sheet.lots * sheet.stock.lotSize
         accountRequestId += 1
+        val mutationEpoch = ++portfolioMutationEpoch
         activeTradeAttemptId = attemptId
-        _uiState.update { it.copy(tradeBusy = true, tradeError = null) }
+        _uiState.update {
+            it.copy(tradeBusy = true, tradeError = null, accountLoading = false)
+        }
         tradeJob = viewModelScope.launch {
             try {
-                val result = repository.executeTrade(
+                val result = repository.submitOrder(
                     mode = context.mode.toModel(),
                     trade = TradeRequest(
                         instrumentId = sheet.stock.id,
                         side = sheet.side.toModel(),
                         quantity = quantity,
-                        orderMode = OrderMode.MARKET,
+                        orderMode = sheet.orderMode.toModel(),
+                        limitPrice = sheet.limitPriceQuoteOrNull(),
                         idempotencyKey = sheet.idempotencyKey,
                     ),
                 )
                 if (
                     activeTradeAttemptId != attemptId ||
+                    mutationEpoch != portfolioMutationEpoch ||
                     !privateContextMatches(context) ||
                     _uiState.value.tradeSheet?.idempotencyKey != attemptId
                 ) {
@@ -848,16 +988,22 @@ class AppViewModel(
                         tradeBusy = false,
                         tradeError = null,
                         transientMessage =
-                            "${if (sheet.side == UiTradeSide.BUY) "买入" else "卖出"} " +
-                                "${sheet.stock.name} $quantity 股成功。",
+                            if (result.order.status == LimitOrderStatus.OPEN) {
+                                "${sheet.stock.name} $quantity 股限价委托已提交。"
+                            } else {
+                                "${if (sheet.side == UiTradeSide.BUY) "买入" else "卖出"} " +
+                                    "${sheet.stock.name} $quantity 股成交。"
+                            },
                     )
                 }
                 loadTransactions()
+                loadOrders()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 if (
                     activeTradeAttemptId != attemptId ||
+                    mutationEpoch != portfolioMutationEpoch ||
                     !privateContextMatches(context)
                 ) {
                     return@launch
@@ -878,6 +1024,55 @@ class AppViewModel(
                     }
                 }
                 tradeJob = null
+            }
+        }
+    }
+
+    fun cancelOrder(orderId: String) {
+        val state = _uiState.value
+        if (state.cancellingOrderId != null || state.tradeBusy) return
+        val order = state.orders.firstOrNull {
+            it.id == orderId && it.status == UiOrderStatus.OPEN
+        } ?: return
+        val context = privateRequestContext() ?: return
+        accountRequestId += 1
+        ordersRequestId += 1
+        val mutationEpoch = ++portfolioMutationEpoch
+        _uiState.update {
+            it.copy(cancellingOrderId = orderId, accountLoading = false)
+        }
+        viewModelScope.launch {
+            runCatching {
+                repository.cancelOrder(context.mode.toModel(), orderId)
+            }.onSuccess { result ->
+                if (
+                    mutationEpoch != portfolioMutationEpoch ||
+                    !privateContextMatches(context)
+                ) return@onSuccess
+                _uiState.update { current ->
+                    current.copy(
+                        portfolio = result.portfolio.toUi(),
+                        orders = current.orders.map {
+                            if (it.id == orderId) result.order.toUi() else it
+                        },
+                        cancellingOrderId = null,
+                        transientMessage = "${order.name} 的委托已撤销，冻结资产已释放。",
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (
+                    mutationEpoch != portfolioMutationEpoch ||
+                    !privateContextMatches(context)
+                ) return@onFailure
+                if (handleSessionExpiry(error)) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        cancellingOrderId = null,
+                        transientMessage = error.userMessage("撤单失败，请重试"),
+                    )
+                }
+                loadAccountData()
             }
         }
     }
@@ -1020,6 +1215,7 @@ class AppViewModel(
         val mode = _uiState.value.mode
         val requestSessionEpoch = sessionEpoch
         val requestHasAccount = _uiState.value.account != null
+        val mutationEpoch = portfolioMutationEpoch
         _uiState.update {
             it.copy(detailLoading = true, detailError = null, orderBook = null)
         }
@@ -1067,15 +1263,24 @@ class AppViewModel(
                 ) {
                     return@onSuccess
                 }
-                _uiState.update {
-                    it.copy(
-                        selectedStock = item.toUi(),
+                _uiState.update { current ->
+                    val freshStock = item.toUi()
+                    val freshPortfolio = if (
+                        mutationEpoch == portfolioMutationEpoch &&
+                        sessionMatches(requestSessionEpoch)
+                    ) {
+                        portfolioResult.first?.toUi() ?: current.portfolio
+                    } else {
+                        current.portfolio
+                    }
+                    current.copy(
+                        selectedStock = freshStock,
                         orderBook = orderBook?.toUi(),
-                        portfolio = if (sessionMatches(requestSessionEpoch)) {
-                            portfolioResult.first?.toUi() ?: it.portfolio
-                        } else {
-                            it.portfolio
-                        },
+                        portfolio = freshPortfolio,
+                        tradeSheet = current.tradeSheet?.withLatestMarketData(
+                            freshStock,
+                            freshPortfolio,
+                        ),
                         detailLoading = false,
                         detailError = null,
                     )
@@ -1199,29 +1404,39 @@ class AppViewModel(
     }
 
     private fun loadAccountData() {
+        if (_uiState.value.cancellingOrderId != null) return
         val context = privateRequestContext() ?: return
         val requestId = ++accountRequestId
+        val mutationEpoch = portfolioMutationEpoch
         _uiState.update { it.copy(accountLoading = true, accountError = null) }
         viewModelScope.launch {
             runCatching {
                 coroutineScope {
                     val portfolio = async { repository.getPortfolio(context.mode.toModel()) }
                     val transactions = async { repository.getTransactions(context.mode.toModel()) }
+                    val orders = async { repository.getOrders(context.mode.toModel()) }
                     val checkIn = async { repository.getCheckInStatus() }
-                    Triple(portfolio.await(), transactions.await(), checkIn.await())
+                    AccountSnapshot(
+                        portfolio = portfolio.await(),
+                        transactions = transactions.await(),
+                        orders = orders.await(),
+                        checkIn = checkIn.await(),
+                    )
                 }
-            }.onSuccess { (portfolio, transactions, checkIn) ->
+            }.onSuccess { snapshot ->
                 if (
                     requestId != accountRequestId ||
+                    mutationEpoch != portfolioMutationEpoch ||
                     !privateContextMatches(context)
                 ) {
                     return@onSuccess
                 }
                 _uiState.update {
                     it.copy(
-                        portfolio = portfolio.toUi(),
-                        transactions = transactions.map(Transaction::toUi),
-                        checkIn = checkIn.toUi(),
+                        portfolio = snapshot.portfolio.toUi(),
+                        transactions = snapshot.transactions.map(Transaction::toUi),
+                        orders = snapshot.orders.map(LimitOrder::toUi),
+                        checkIn = snapshot.checkIn.toUi(),
                         accountLoading = false,
                         accountError = null,
                     )
@@ -1230,6 +1445,7 @@ class AppViewModel(
                 if (error is CancellationException) return@onFailure
                 if (
                     requestId != accountRequestId ||
+                    mutationEpoch != portfolioMutationEpoch ||
                     !privateContextMatches(context)
                 ) {
                     return@onFailure
@@ -1246,15 +1462,18 @@ class AppViewModel(
     }
 
     private fun loadUserData(openPendingTrade: Boolean) {
+        if (_uiState.value.cancellingOrderId != null) return
         val context = privateRequestContext() ?: return
         loadWatchlist()
         val requestId = ++accountRequestId
+        val mutationEpoch = portfolioMutationEpoch
         _uiState.update { it.copy(accountLoading = true, accountError = null) }
         viewModelScope.launch {
             runCatching { repository.getPortfolio(context.mode.toModel()) }
                 .onSuccess { portfolio ->
                     if (
                         requestId != accountRequestId ||
+                        mutationEpoch != portfolioMutationEpoch ||
                         !privateContextMatches(context)
                     ) {
                         return@onSuccess
@@ -1286,6 +1505,7 @@ class AppViewModel(
                     if (error is CancellationException) return@onFailure
                     if (
                         requestId != accountRequestId ||
+                        mutationEpoch != portfolioMutationEpoch ||
                         !privateContextMatches(context)
                     ) {
                         return@onFailure
@@ -1333,6 +1553,37 @@ class AppViewModel(
         }
     }
 
+    private fun loadOrders() {
+        if (_uiState.value.cancellingOrderId != null) return
+        val context = privateRequestContext() ?: return
+        val requestId = ++ordersRequestId
+        val mutationEpoch = portfolioMutationEpoch
+        viewModelScope.launch {
+            runCatching { repository.getOrders(context.mode.toModel()) }
+                .onSuccess { orders ->
+                    if (
+                        requestId == ordersRequestId &&
+                        mutationEpoch == portfolioMutationEpoch &&
+                        privateContextMatches(context)
+                    ) {
+                        _uiState.update {
+                            it.copy(orders = orders.map(LimitOrder::toUi))
+                        }
+                    }
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) return@onFailure
+                    if (
+                        requestId == ordersRequestId &&
+                        mutationEpoch == portfolioMutationEpoch &&
+                        privateContextMatches(context)
+                    ) {
+                        handleSessionExpiry(error)
+                    }
+                }
+        }
+    }
+
     private suspend fun refreshVisibleData(cycle: Long) {
         val state = _uiState.value
         if (
@@ -1342,7 +1593,8 @@ class AppViewModel(
             state.sessionRestoring ||
             state.authBusy ||
             state.tradeBusy ||
-            state.rewardBusy
+            state.rewardBusy ||
+            state.cancellingOrderId != null
         ) {
             return
         }
@@ -1452,7 +1704,11 @@ class AppViewModel(
 
     private suspend fun refreshAssetsSilently() {
         val context = privateRequestContext() ?: return
-        if (_uiState.value.accountLoading) return
+        val mutationEpoch = portfolioMutationEpoch
+        if (
+            _uiState.value.accountLoading ||
+            _uiState.value.cancellingOrderId != null
+        ) return
         val result = try {
             coroutineScope {
                 val portfolio = async {
@@ -1461,7 +1717,10 @@ class AppViewModel(
                 val transactions = async {
                     repository.getTransactions(context.mode.toModel())
                 }
-                portfolio.await() to transactions.await()
+                val orders = async {
+                    repository.getOrders(context.mode.toModel())
+                }
+                Triple(portfolio.await(), transactions.await(), orders.await())
             }
         } catch (error: CancellationException) {
             throw error
@@ -1475,6 +1734,7 @@ class AppViewModel(
         if (
             current.screen == AppScreen.MAIN &&
             current.selectedTab == MainTab.ASSETS &&
+            mutationEpoch == portfolioMutationEpoch &&
             privateContextMatches(context) &&
             !current.accountLoading
         ) {
@@ -1482,6 +1742,7 @@ class AppViewModel(
                 it.copy(
                     portfolio = result.first.toUi(),
                     transactions = result.second.map(Transaction::toUi),
+                    orders = result.third.map(LimitOrder::toUi),
                     accountError = null,
                 )
             }
@@ -1496,7 +1757,8 @@ class AppViewModel(
         val range = snapshot.chartRange
         val requestSessionEpoch = sessionEpoch
         val hasAccount = snapshot.account != null
-        if (snapshot.detailLoading || snapshot.chartLoading) return
+        val mutationEpoch = portfolioMutationEpoch
+        if (snapshot.detailLoading) return
 
         val result = try {
             coroutineScope {
@@ -1566,25 +1828,33 @@ class AppViewModel(
             current.selectedInstrumentId != instrumentId ||
             current.mode != mode ||
             current.chartRange != range ||
-            current.detailLoading ||
-            current.chartLoading
+            current.detailLoading
         ) {
             return
         }
-        _uiState.update {
-            it.copy(
-                selectedStock = result.item.toUi(),
-                orderBook = result.orderBook?.toUi() ?: it.orderBook,
-                portfolio = if (sessionMatches(requestSessionEpoch)) {
-                    result.portfolio?.toUi() ?: it.portfolio
-                } else {
-                    it.portfolio
-                },
-                candles = result.chart ?: it.candles,
+        _uiState.update { state ->
+            val freshStock = result.item.toUi()
+            val freshPortfolio = if (
+                mutationEpoch == portfolioMutationEpoch &&
+                sessionMatches(requestSessionEpoch)
+            ) {
+                result.portfolio?.toUi() ?: state.portfolio
+            } else {
+                state.portfolio
+            }
+            state.copy(
+                selectedStock = freshStock,
+                orderBook = result.orderBook?.toUi() ?: state.orderBook,
+                portfolio = freshPortfolio,
+                tradeSheet = state.tradeSheet?.withLatestMarketData(
+                    freshStock,
+                    freshPortfolio,
+                ),
+                candles = result.chart ?: state.candles,
                 chartNotice = if (result.chart != null) {
                     result.chartNotice
                 } else {
-                    it.chartNotice
+                    state.chartNotice
                 },
                 detailError = null,
             )
@@ -1632,18 +1902,21 @@ class AppViewModel(
         watchlistRequestId += 1
         accountRequestId += 1
         transactionsRequestId += 1
+        ordersRequestId += 1
         _uiState.update {
             it.copy(
                 account = null,
                 sessionRestoring = false,
                 portfolio = null,
                 transactions = emptyList(),
+                orders = emptyList(),
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,
                 accountLoading = false,
                 rewardBusy = false,
                 tradeBusy = false,
+                cancellingOrderId = null,
                 tradeSheet = null,
                 returnScreen = if (it.screen == AppScreen.AUTH) {
                     it.returnScreen
@@ -1661,25 +1934,15 @@ class AppViewModel(
     private fun showTradeSheet(side: UiTradeSide) {
         val state = _uiState.value
         val stock = state.selectedStock ?: return
-        val position = state.selectedPosition
-        val maxLots = when (side) {
-            UiTradeSide.BUY -> maximumAffordableLots(
-                budgetUsd = state.portfolio?.availableCashUsd ?: 0.0,
-                grossPerLotUsd = stock.priceUsd() * stock.lotSize,
-            )
-            UiTradeSide.SELL -> {
-                floor((position?.availableQuantity ?: 0.0) / stock.lotSize).toInt()
-            }
-        }.coerceAtLeast(0)
+        val draft = TradeSheetUi(
+            stock = stock,
+            side = side,
+            limitPriceCurrency = state.displayCurrency,
+            idempotencyKey = UUID.randomUUID().toString(),
+        ).recalculateForPortfolio(state.portfolio)
         _uiState.update {
             it.copy(
-                tradeSheet = TradeSheetUi(
-                    stock = stock,
-                    side = side,
-                    lots = if (maxLots > 0) 1 else 0,
-                    maxLots = maxLots,
-                    idempotencyKey = UUID.randomUUID().toString(),
-                ),
+                tradeSheet = draft,
                 tradeError = null,
             )
         }
@@ -1697,24 +1960,6 @@ class AppViewModel(
         }
     }
 }
-
-private fun maximumAffordableLots(
-    budgetUsd: Double,
-    grossPerLotUsd: Double,
-): Int {
-    if (budgetUsd <= 0 || grossPerLotUsd <= 0) return 0
-    var lots = floor(budgetUsd / (grossPerLotUsd * (1 + TRADE_FEE_RATE))).toInt()
-    while (lots > 0) {
-        val gross = grossPerLotUsd * lots
-        val fee = maxOf(MINIMUM_TRADE_FEE_USD, gross * TRADE_FEE_RATE)
-        if (gross + fee <= budgetUsd) return lots
-        lots -= 1
-    }
-    return 0
-}
-
-private fun StockUi.priceUsd(): Double =
-    if (quoteCurrency == Currency.CNY.name) currentPrice / 7.0 else currentPrice
 
 private fun UiMarketMode.toModel(): MarketMode =
     if (this == UiMarketMode.REAL) MarketMode.REAL else MarketMode.VIRTUAL
@@ -1739,6 +1984,8 @@ private fun MarketFilter.toModelOrNull(): Market? = when (this) {
 private fun UiChartRange.toModel(): ChartRange = ChartRange.valueOf(name)
 
 private fun UiTradeSide.toModel(): TradeSide = TradeSide.valueOf(name)
+
+private fun UiOrderMode.toModel(): OrderMode = OrderMode.valueOf(name)
 
 private fun PublicAccount.toUi(): AccountUi = AccountUi(
     username = username,
@@ -1794,6 +2041,7 @@ private fun Position.toUi(): PositionUi = PositionUi(
     market = market.name,
     quantity = quantity.toDouble(),
     availableQuantity = availableQuantity.toDouble(),
+    frozenQuantity = frozenQuantity.toDouble(),
     pendingSettlementQuantity = pendingSettlementQuantity.toDouble(),
     averageCostUsd = averageCostUsd,
     currentPriceUsd = currentPriceUsd,
@@ -1824,6 +2072,25 @@ private fun Transaction.toUi(): TransactionUi = TransactionUi(
     netAmountUsd = netAmountUsd,
     realizedProfitUsd = realizedProfitUsd,
     createdAt = createdAt,
+)
+
+private fun LimitOrder.toUi(): LimitOrderUi = LimitOrderUi(
+    id = id,
+    instrumentId = instrumentId,
+    symbol = symbol,
+    name = name,
+    market = market.name,
+    side = UiTradeSide.valueOf(side.name),
+    orderMode = UiOrderMode.valueOf(orderMode.name),
+    status = UiOrderStatus.valueOf(status.name),
+    quantity = quantity.toDouble(),
+    filledQuantity = filledQuantity.toDouble(),
+    limitPrice = limitPrice,
+    quoteCurrency = quoteCurrency.name,
+    reservedCashUsd = reservedCashUsd,
+    reservedQuantity = reservedQuantity.toDouble(),
+    createdAt = createdAt,
+    updatedAt = updatedAt,
 )
 
 private fun DailyCheckInStatus.toUi(): CheckInUi = CheckInUi(

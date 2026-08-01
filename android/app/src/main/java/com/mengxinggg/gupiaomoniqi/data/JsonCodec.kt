@@ -15,8 +15,11 @@ import com.mengxinggg.gupiaomoniqi.model.InstrumentType
 import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
+import com.mengxinggg.gupiaomoniqi.model.LimitOrder
 import com.mengxinggg.gupiaomoniqi.model.OrderBook
 import com.mengxinggg.gupiaomoniqi.model.OrderBookLevel
+import com.mengxinggg.gupiaomoniqi.model.OrderCancellationResult
+import com.mengxinggg.gupiaomoniqi.model.OrderSubmissionResult
 import com.mengxinggg.gupiaomoniqi.model.Page
 import com.mengxinggg.gupiaomoniqi.model.Portfolio
 import com.mengxinggg.gupiaomoniqi.model.Position
@@ -173,6 +176,46 @@ object JsonCodec {
 
     fun transactions(json: JSONArray): List<Transaction> =
         json.mapObjects(::transaction)
+
+    fun limitOrder(json: JSONObject): LimitOrder = LimitOrder(
+        id = json.getString("id"),
+        mode = json.enum("mode"),
+        instrumentId = json.getString("instrumentId"),
+        symbol = json.getString("symbol"),
+        name = json.getString("name"),
+        market = json.enum("market"),
+        side = json.enum("side"),
+        orderMode = json.enum("orderMode"),
+        status = json.enum("status"),
+        quantity = json.getInt("quantity"),
+        filledQuantity = json.getInt("filledQuantity"),
+        limitPrice = json.nullableDouble("limitPrice"),
+        quoteCurrency = json.enum("quoteCurrency"),
+        reservedCashUsd = json.getDouble("reservedCashUsd"),
+        reservedQuantity = json.getInt("reservedQuantity"),
+        actorType = json.enum("actorType"),
+        createdAt = json.getString("createdAt"),
+        updatedAt = json.getString("updatedAt"),
+        filledAt = json.nullableString("filledAt"),
+        cancelledAt = json.nullableString("cancelledAt"),
+        transactionId = json.nullableString("transactionId"),
+    )
+
+    fun limitOrders(json: JSONArray): List<LimitOrder> =
+        json.mapObjects(::limitOrder)
+
+    fun orderSubmissionResult(json: JSONObject): OrderSubmissionResult =
+        OrderSubmissionResult(
+            order = limitOrder(json.getJSONObject("order")),
+            transaction = json.nullableObject("transaction")?.let(::transaction),
+            portfolio = portfolio(json.getJSONObject("portfolio")),
+        )
+
+    fun orderCancellationResult(json: JSONObject): OrderCancellationResult =
+        OrderCancellationResult(
+            order = limitOrder(json.getJSONObject("order")),
+            portfolio = portfolio(json.getJSONObject("portfolio")),
+        )
 
     fun tradeResult(json: JSONObject): TradeResult = TradeResult(
         transaction = transaction(json.getJSONObject("transaction")),

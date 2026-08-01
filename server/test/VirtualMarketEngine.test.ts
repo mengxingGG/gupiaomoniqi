@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { GAME_RULES } from "../src/config.js";
+import {
+  VIRTUAL_MARKET_IMPACT_RULES,
+} from "../src/virtual-market/VirtualMarketEngine.js";
 import { createTestHarness, TEST_INSTRUMENTS } from "./helpers.js";
 
 describe("VirtualMarketEngine", () => {
@@ -97,5 +100,59 @@ describe("VirtualMarketEngine", () => {
     expect(after).toBeDefined();
     expect(after?.changePercent).toBeGreaterThan(0.15);
     expect(after?.volume).toBeGreaterThan(before.volume + 1_000);
+  });
+
+  it("美元名义成交额越大冲击越强且一亿元冲击显著", async () => {
+    const changeFor = async (notionalUsd: number) => {
+      const { engine, repository } = await createTestHarness({
+        random: () => 0.5,
+      });
+      const before = repository.getQuote("us-aapl")!;
+      engine.recordTrade("us-aapl", "BUY", 1_000, "USER", notionalUsd);
+      await engine.tick();
+      const after = repository.getQuote("us-aapl")!;
+      return (after.currentPrice - before.currentPrice) / before.currentPrice;
+    };
+
+    const small = await changeFor(100_000);
+    const medium = await changeFor(10_000_000);
+    const large = await changeFor(100_000_000);
+
+    expect(small).toBeGreaterThan(0);
+    expect(medium).toBeGreaterThan(small);
+    expect(large).toBeGreaterThan(medium);
+    expect(large).toBeGreaterThan(0.015);
+    expect(large).toBeLessThanOrEqual(
+      VIRTUAL_MARKET_IMPACT_RULES.maximumAppliedImpactPerTickRate + 0.0002,
+    );
+  });
+
+  it("同 tick 等额反向成交互相抵消价格冲击", async () => {
+    const { engine, repository } = await createTestHarness({ random: () => 0.5 });
+    const before = repository.getQuote("us-aapl")!;
+
+    engine.recordTrade("us-aapl", "BUY", 100_000, "USER", 100_000_000);
+    engine.recordTrade("us-aapl", "SELL", 100_000, "AI", 100_000_000);
+    await engine.tick();
+    const after = repository.getQuote("us-aapl")!;
+
+    expect(after.currentPrice).toBe(before.currentPrice);
+    expect(after.volume).toBeGreaterThanOrEqual(before.volume + 200_000);
+  });
+
+  it("连续巨额成交可推动行情但绝不突破日涨停", async () => {
+    const { engine, repository } = await createTestHarness({ random: () => 0.5 });
+
+    for (let index = 0; index < 20; index += 1) {
+      engine.recordTrade("us-aapl", "BUY", 100_000, "AI", 100_000_000);
+      await engine.tick();
+    }
+    const quote = repository.getQuote("us-aapl")!;
+    const upperLimit = quote.previousClose * (1 + GAME_RULES.dailyPriceLimitRate);
+
+    expect(quote.currentPrice).toBeGreaterThan(quote.previousClose * 1.05);
+    expect(quote.currentPrice).toBeLessThanOrEqual(
+      Math.round(upperLimit * 100) / 100,
+    );
   });
 });

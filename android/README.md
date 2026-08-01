@@ -17,15 +17,15 @@
 sdk.dir=C\:\\Users\\你的用户名\\AppData\\Local\\Android\\Sdk
 ```
 
-项目暂未提交 Gradle Wrapper 时，可从仓库根目录执行：
+可从仓库根目录执行：
 
 ```powershell
-gradle -p android :app:assembleDebug
-gradle -p android :app:testDebugUnitTest
+.\android\gradlew.bat -p android :app:assembleDebug
+.\android\gradlew.bat -p android :app:testDebugUnitTest
 ```
 
 依赖均按项目指定版本固定，可在依赖已缓存时追加 `--offline` 进行离线构建。
 
 ## 本地开发网络
 
-Manifest 当前允许 cleartext HTTP，以便 Android 模拟器或测试设备访问局域网内的开发服务。该设置只适合本地开发；正式发布前应改为仅允许 HTTPS，或通过 Network Security Config 将例外限制到明确的开发域名。
+客户端允许访问局域网 HTTP 开发服务；对外部署和应用内更新请使用 HTTPS。服务器地址可在登录页设置中修改。

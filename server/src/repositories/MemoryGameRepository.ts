@@ -1,10 +1,12 @@
 import type {
   CandleInterval,
   DisplayCurrency,
+  OrderStatus,
   Quote,
   Transaction,
 } from "@gupiaomoniqi/shared";
 import type {
+  AITraderDecisionRecord,
   AITraderRecord,
   AccountRecord,
   CandleRecord,
@@ -12,6 +14,8 @@ import type {
   CreateAccountCommit,
   GameRepository,
   InstrumentRecord,
+  OrderRecord,
+  OrderStateCommit,
   PortfolioRecord,
   PositionRecord,
   SessionRecord,
@@ -31,10 +35,15 @@ export class MemoryGameRepository implements GameRepository {
   readonly #portfolioIdsByAccount = new Map<string, string>();
   readonly #positions = new Map<string, Map<string, PositionRecord>>();
   readonly #transactions = new Map<string, Transaction[]>();
+  readonly #orders = new Map<string, OrderRecord>();
   readonly #settlementLots = new Map<string, SettlementLotRecord>();
   readonly #cashAdjustmentClaims = new Set<string>();
   readonly #aiTraders = new Map<string, AITraderRecord>();
   readonly #aiTraderIdsByPortfolio = new Map<string, string>();
+  readonly #aiTraderDecisions = new Map<
+    string,
+    AITraderDecisionRecord[]
+  >();
 
   constructor(instruments: InstrumentRecord[]) {
     for (const instrument of instruments) {
@@ -213,6 +222,73 @@ export class MemoryGameRepository implements GameRepository {
     return transaction ? structuredClone(transaction) : undefined;
   }
 
+  listOrders(
+    portfolioId: string,
+    status?: OrderStatus,
+  ): OrderRecord[] {
+    return [...this.#orders.values()]
+      .filter(
+        (order) =>
+          order.portfolioId === portfolioId &&
+          (!status || order.status === status),
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map((order) => structuredClone(order));
+  }
+
+  listOpenOrders(instrumentIds?: string[]): OrderRecord[] {
+    const allowed = instrumentIds ? new Set(instrumentIds) : null;
+    return [...this.#orders.values()]
+      .filter(
+        (order) =>
+          order.status === "OPEN" &&
+          (!allowed || allowed.has(order.instrumentId)),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((order) => structuredClone(order));
+  }
+
+  getOrderById(orderId: string): OrderRecord | undefined {
+    const order = this.#orders.get(orderId);
+    return order ? structuredClone(order) : undefined;
+  }
+
+  getOrderByIdempotencyKey(
+    portfolioId: string,
+    idempotencyKey: string,
+  ): OrderRecord | undefined {
+    const order = [...this.#orders.values()].find(
+      (candidate) =>
+        candidate.portfolioId === portfolioId &&
+        candidate.idempotencyKey === idempotencyKey,
+    );
+    return order ? structuredClone(order) : undefined;
+  }
+
+  async commitOrderState(commit: OrderStateCommit): Promise<void> {
+    const portfolio = this.#portfolios.get(commit.portfolioId);
+    if (!portfolio) {
+      throw new Error("PORTFOLIO_NOT_FOUND");
+    }
+    portfolio.availableCashUsd = commit.availableCashUsd;
+    portfolio.frozenCashUsd = commit.frozenCashUsd;
+    if (commit.position !== undefined) {
+      const positions =
+        this.#positions.get(commit.portfolioId) ??
+        new Map<string, PositionRecord>();
+      this.#positions.set(commit.portfolioId, positions);
+      if (commit.position) {
+        positions.set(
+          commit.position.instrumentId,
+          structuredClone(commit.position),
+        );
+      } else {
+        positions.delete(commit.instrumentId);
+      }
+    }
+    this.#orders.set(commit.order.id, structuredClone(commit.order));
+  }
+
   async commitTrade(commit: TradeCommit): Promise<void> {
     const portfolio = this.#portfolios.get(commit.portfolioId);
 
@@ -221,6 +297,9 @@ export class MemoryGameRepository implements GameRepository {
     }
 
     portfolio.availableCashUsd = commit.availableCashUsd;
+    if (commit.frozenCashUsd !== undefined) {
+      portfolio.frozenCashUsd = commit.frozenCashUsd;
+    }
     const positions =
       this.#positions.get(commit.portfolioId) ??
       new Map<string, PositionRecord>();
@@ -247,6 +326,10 @@ export class MemoryGameRepository implements GameRepository {
         commit.settlementLot.id,
         structuredClone(commit.settlementLot),
       );
+    }
+
+    if (commit.order) {
+      this.#orders.set(commit.order.id, structuredClone(commit.order));
     }
   }
 
@@ -314,6 +397,30 @@ export class MemoryGameRepository implements GameRepository {
     this.#cashAdjustmentClaims.add(claimId);
   }
 
+  async ensureAIPortfolioCashFloor(
+    portfolioId: string,
+    thresholdUsd: number,
+    topUpUsd: number,
+  ): Promise<boolean> {
+    const portfolio = this.#portfolios.get(portfolioId);
+    if (!portfolio) {
+      throw new Error("PORTFOLIO_NOT_FOUND");
+    }
+    if (
+      portfolio.availableCashUsd + portfolio.frozenCashUsd >=
+      thresholdUsd
+    ) {
+      return false;
+    }
+    portfolio.initialCashUsd = roundCash(
+      portfolio.initialCashUsd + topUpUsd,
+    );
+    portfolio.availableCashUsd = roundCash(
+      portfolio.availableCashUsd + topUpUsd,
+    );
+    return true;
+  }
+
   listAITraders(): AITraderRecord[] {
     return [...this.#aiTraders.values()].map((trader) =>
       structuredClone(trader),
@@ -371,6 +478,26 @@ export class MemoryGameRepository implements GameRepository {
     }
   }
 
+  listAITraderDecisions(
+    traderId: string,
+    limit: number,
+  ): AITraderDecisionRecord[] {
+    return (this.#aiTraderDecisions.get(traderId) ?? [])
+      .slice(0, Math.max(0, limit))
+      .map((decision) => structuredClone(decision));
+  }
+
+  async appendAITraderDecision(
+    decision: AITraderDecisionRecord,
+  ): Promise<void> {
+    const decisions = this.#aiTraderDecisions.get(decision.traderId) ?? [];
+    decisions.unshift(structuredClone(decision));
+    if (decisions.length > 100) {
+      decisions.length = 100;
+    }
+    this.#aiTraderDecisions.set(decision.traderId, decisions);
+  }
+
   #requireAccount(accountId: string): AccountRecord {
     const account = this.#accounts.get(accountId);
 
@@ -403,4 +530,8 @@ function cloneLatestCandle(
     }
   }
   return latest ? structuredClone(latest) : undefined;
+}
+
+function roundCash(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
 }

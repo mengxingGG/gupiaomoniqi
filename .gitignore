@@ -24,6 +24,7 @@ npm-version-test.*
 .env.local
 .env.*
 !.env.example
+config.json
 *.log
 *.tsbuildinfo
 *.tmp

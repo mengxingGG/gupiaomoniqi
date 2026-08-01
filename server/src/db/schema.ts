@@ -370,6 +370,8 @@ export const aiTraders = pgTable(
     riskLevel: integer("risk_level").notNull(),
     activityLevel: integer("activity_level").notNull(),
     preferredMarket: text("preferred_market").notNull(),
+    traderKind: text("trader_kind").notNull().default("RULE"),
+    personaKey: text("persona_key"),
     isActive: boolean("is_active").notNull().default(true),
     lastActionAt: timestamp("last_action_at", {
       withTimezone: true,
@@ -394,6 +396,33 @@ export const aiTraders = pgTable(
     index("ai_traders_next_action_index").on(
       table.isActive,
       table.nextActionAt,
+    ),
+    uniqueIndex("ai_traders_persona_key_unique").on(table.personaKey),
+  ],
+);
+
+export const aiTraderDecisions = pgTable(
+  "ai_trader_decisions",
+  {
+    id: uuid("id").primaryKey(),
+    traderId: uuid("trader_id")
+      .notNull()
+      .references(() => aiTraders.id, { onDelete: "cascade" }),
+    decidedAt: timestamp("decided_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    action: text("action").notNull(),
+    instrumentId: text("instrument_id"),
+    result: text("result").notNull(),
+    reason: text("reason"),
+    modelId: text("model_id").notNull(),
+    detail: text("detail"),
+  },
+  (table) => [
+    index("ai_trader_decisions_trader_time_index").on(
+      table.traderId,
+      table.decidedAt,
     ),
   ],
 );
@@ -528,6 +557,80 @@ export const transactions = pgTable(
       table.createdAt,
     ),
     uniqueIndex("transactions_portfolio_idempotency_unique").on(
+      table.portfolioId,
+      table.idempotencyKey,
+    ),
+  ],
+);
+
+export const orders = pgTable(
+  "orders",
+  {
+    id: uuid("id").primaryKey(),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    instrumentId: text("instrument_id")
+      .notNull()
+      .references(() => instruments.id),
+    side: text("side").notNull(),
+    orderMode: text("order_mode").notNull(),
+    status: text("status").notNull(),
+    quantity: integer("quantity").notNull(),
+    filledQuantity: integer("filled_quantity").notNull().default(0),
+    limitPrice: numeric("limit_price", {
+      precision: 24,
+      scale: 4,
+      mode: "number",
+    }),
+    quoteCurrency: text("quote_currency").notNull(),
+    reservedCashUsd: numeric("reserved_cash_usd", {
+      precision: 24,
+      scale: 2,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    reservedQuantity: integer("reserved_quantity").notNull().default(0),
+    actorType: text("actor_type").notNull().default("USER"),
+    actorId: text("actor_id").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    filledAt: timestamp("filled_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    cancelledAt: timestamp("cancelled_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    transactionId: uuid("transaction_id").references(
+      () => transactions.id,
+      { onDelete: "set null" },
+    ),
+  },
+  (table) => [
+    index("orders_portfolio_created_index").on(
+      table.portfolioId,
+      table.createdAt,
+    ),
+    index("orders_open_instrument_index").on(
+      table.status,
+      table.instrumentId,
+      table.createdAt,
+    ),
+    uniqueIndex("orders_portfolio_idempotency_unique").on(
       table.portfolioId,
       table.idempotencyKey,
     ),

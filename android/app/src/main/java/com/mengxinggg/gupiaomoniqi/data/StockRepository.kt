@@ -9,13 +9,16 @@ import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
 import com.mengxinggg.gupiaomoniqi.model.MarketQuery
+import com.mengxinggg.gupiaomoniqi.model.LimitOrder
+import com.mengxinggg.gupiaomoniqi.model.LimitOrderStatus
 import com.mengxinggg.gupiaomoniqi.model.OrderBook
+import com.mengxinggg.gupiaomoniqi.model.OrderCancellationResult
+import com.mengxinggg.gupiaomoniqi.model.OrderSubmissionResult
 import com.mengxinggg.gupiaomoniqi.model.Page
 import com.mengxinggg.gupiaomoniqi.model.Portfolio
 import com.mengxinggg.gupiaomoniqi.model.PublicAccount
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
-import com.mengxinggg.gupiaomoniqi.model.TradeResult
 import com.mengxinggg.gupiaomoniqi.model.Transaction
 import com.mengxinggg.gupiaomoniqi.model.Watchlist
 import kotlinx.coroutines.CoroutineDispatcher
@@ -60,10 +63,20 @@ interface StockRepository {
     suspend fun getPortfolio(mode: MarketMode): Portfolio
     suspend fun getTransactions(mode: MarketMode): List<Transaction>
 
-    suspend fun executeTrade(
+    suspend fun submitOrder(
         mode: MarketMode,
         trade: TradeRequest,
-    ): TradeResult
+    ): OrderSubmissionResult
+
+    suspend fun getOrders(
+        mode: MarketMode,
+        status: LimitOrderStatus? = null,
+    ): List<LimitOrder>
+
+    suspend fun cancelOrder(
+        mode: MarketMode,
+        orderId: String,
+    ): OrderCancellationResult
 
     suspend fun getWatchlist(mode: MarketMode): Watchlist
 
@@ -161,10 +174,20 @@ class DefaultStockRepository(
         mode: MarketMode,
     ): List<Transaction> = io { apiClient.transactions(mode) }
 
-    override suspend fun executeTrade(
+    override suspend fun submitOrder(
         mode: MarketMode,
         trade: TradeRequest,
-    ): TradeResult = io { apiClient.trade(mode, trade) }
+    ): OrderSubmissionResult = io { apiClient.submitOrder(mode, trade) }
+
+    override suspend fun getOrders(
+        mode: MarketMode,
+        status: LimitOrderStatus?,
+    ): List<LimitOrder> = io { apiClient.orders(mode, status) }
+
+    override suspend fun cancelOrder(
+        mode: MarketMode,
+        orderId: String,
+    ): OrderCancellationResult = io { apiClient.cancelOrder(mode, orderId) }
 
     override suspend fun getWatchlist(
         mode: MarketMode,

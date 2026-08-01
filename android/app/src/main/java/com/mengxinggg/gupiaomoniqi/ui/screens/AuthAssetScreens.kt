@@ -39,9 +39,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mengxinggg.gupiaomoniqi.ui.AppUiState
 import com.mengxinggg.gupiaomoniqi.ui.AuthMode
+import com.mengxinggg.gupiaomoniqi.ui.LimitOrderUi
 import com.mengxinggg.gupiaomoniqi.ui.PositionUi
 import com.mengxinggg.gupiaomoniqi.ui.TransactionUi
 import com.mengxinggg.gupiaomoniqi.ui.UiMarketMode
+import com.mengxinggg.gupiaomoniqi.ui.UiOrderMode
+import com.mengxinggg.gupiaomoniqi.ui.UiOrderStatus
 import com.mengxinggg.gupiaomoniqi.ui.components.EmptyPanel
 import com.mengxinggg.gupiaomoniqi.ui.components.ErrorPanel
 import com.mengxinggg.gupiaomoniqi.ui.components.LoadingPanel
@@ -222,9 +225,13 @@ fun AssetsScreen(
     onOpenStock: (String) -> Unit,
     onCheckIn: () -> Unit,
     onRedeemGift: (String) -> Unit,
+    onCancelOrder: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var giftCode by rememberSaveable(state.mode) { mutableStateOf("") }
+    var orderFilter by rememberSaveable(state.mode) {
+        mutableStateOf(UiOrderStatus.OPEN.name)
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -304,6 +311,14 @@ fun AssetsScreen(
             }
         }
         item {
+            AssetMetric(
+                label = "冻结资金",
+                value = formatMoney(portfolio.frozenCashUsd, state.displayCurrency),
+                note = "未成交买入委托占用，撤单后自动释放",
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AssetMetric(
                     label = "持仓市值",
@@ -321,6 +336,53 @@ fun AssetsScreen(
                     note = "已实现 ${formatMoney(portfolio.realizedProfitUsd, state.displayCurrency)}",
                     modifier = Modifier.weight(1f),
                     movement = portfolio.totalProfitLossUsd,
+                )
+            }
+        }
+
+        item {
+            SectionTitle(
+                title = "委托订单",
+                caption = "${state.orders.count { it.status == UiOrderStatus.OPEN }} 笔等待成交",
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                listOf(
+                    UiOrderStatus.OPEN.name to "进行中",
+                    UiOrderStatus.FILLED.name to "已成交",
+                    UiOrderStatus.CANCELLED.name to "已撤单",
+                    "ALL" to "全部",
+                ).forEach { (value, label) ->
+                    FilterChip(
+                        selected = orderFilter == value,
+                        onClick = { orderFilter = value },
+                        label = { Text(label) },
+                    )
+                }
+            }
+        }
+        val visibleOrders = state.orders.filter {
+            orderFilter == "ALL" || it.status.name == orderFilter
+        }
+        if (visibleOrders.isEmpty()) {
+            item {
+                EmptyPanel(
+                    title = if (orderFilter == UiOrderStatus.OPEN.name) {
+                        "暂无进行中的委托"
+                    } else {
+                        "该分类暂无订单"
+                    },
+                    description = "限价单提交后可在这里查看状态与撤单。",
+                )
+            }
+        } else {
+            items(visibleOrders, key = { it.id }) { order ->
+                LimitOrderCard(
+                    order = order,
+                    state = state,
+                    onClick = { onOpenStock(order.instrumentId) },
+                    onCancel = { onCancelOrder(order.id) },
                 )
             }
         }
@@ -522,7 +584,12 @@ private fun PositionCard(
             }
             Row {
                 Text(
-                    "持仓 ${formatQuantity(position.quantity)} · 可卖 ${formatQuantity(position.availableQuantity)}",
+                    "持仓 ${formatQuantity(position.quantity)} · 可卖 ${formatQuantity(position.availableQuantity)}" +
+                        if (position.frozenQuantity > 0) {
+                            " · 冻结 ${formatQuantity(position.frozenQuantity)}"
+                        } else {
+                            ""
+                        },
                     modifier = Modifier.weight(1f),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
@@ -534,6 +601,100 @@ private fun PositionCard(
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LimitOrderCard(
+    order: LimitOrderUi,
+    state: AppUiState,
+    onClick: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val sideColor = if (order.side.name == "BUY") GainRed else LossGreen
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = sideColor.copy(alpha = 0.14f),
+                ) {
+                    Text(
+                        if (order.side.name == "BUY") "买入" else "卖出",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        color = sideColor,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                Spacer(Modifier.padding(4.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(order.name, fontWeight = FontWeight.Bold)
+                    Text(
+                        "${order.symbol} · ${marketLabel(order.market)} · ${formatTime(order.createdAt)}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Text(
+                    order.status.label,
+                    color = if (order.status == UiOrderStatus.OPEN) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            Row {
+                Text(
+                    if (order.orderMode == UiOrderMode.LIMIT) {
+                        val quotePriceUsd = if (order.quoteCurrency == "CNY") {
+                            (order.limitPrice ?: 0.0) / 7.0
+                        } else {
+                            order.limitPrice ?: 0.0
+                        }
+                        "限价 ${formatMoney(quotePriceUsd, state.displayCurrency)}"
+                    } else {
+                        "市价单"
+                    },
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "${formatQuantity(order.filledQuantity)}/${formatQuantity(order.quantity)} 股",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (order.status == UiOrderStatus.OPEN) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (order.side.name == "BUY") {
+                            "冻结 ${formatMoney(order.reservedCashUsd, state.displayCurrency)}"
+                        } else {
+                            "冻结 ${formatQuantity(order.reservedQuantity)} 股"
+                        },
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    TextButton(
+                        onClick = onCancel,
+                        enabled = state.cancellingOrderId == null,
+                    ) {
+                        Text(if (state.cancellingOrderId == order.id) "撤单中…" else "撤单")
+                    }
+                }
             }
         }
     }

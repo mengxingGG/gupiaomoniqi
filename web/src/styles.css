@@ -1279,6 +1279,65 @@ button:disabled {
   background: #fafcf7;
 }
 
+.order-management {
+  border-color: rgba(23, 77, 58, 0.13);
+}
+
+.order-notice {
+  margin: 10px 14px 0;
+  font-size: 10px;
+}
+
+.compact-empty {
+  padding-block: 30px;
+}
+
+.orders-table th,
+.orders-table td {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.order-status {
+  display: inline-flex !important;
+  width: max-content;
+  margin: 0 !important;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 8px !important;
+  font-weight: 760;
+}
+
+.order-status.open {
+  color: #8b651a !important;
+  background: rgba(226, 171, 54, 0.13);
+}
+
+.order-status.filled {
+  color: var(--down) !important;
+  background: var(--down-soft);
+}
+
+.order-status.cancelled {
+  color: #758078 !important;
+  background: #eef1ec;
+}
+
+.cancel-order-button {
+  min-height: 29px;
+  padding: 0 10px;
+  border: 1px solid rgba(158, 52, 46, 0.18);
+  border-radius: 8px;
+  color: #9e342e;
+  background: #fff8f7;
+  font-size: 9px;
+  font-weight: 720;
+}
+
+.cancel-order-button:hover:not(:disabled) {
+  border-color: #9e342e;
+}
+
 .account-table td > strong,
 .account-table td > span {
   display: block;
@@ -1992,13 +2051,25 @@ button:disabled {
   font-weight: 720;
 }
 
+.order-mode-switch,
 .trade-side-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 5px;
+}
+
+.order-mode-switch {
+  margin-bottom: 8px;
+  padding: 3px;
+  border-radius: 10px;
+  background: #eff2ec;
+}
+
+.trade-side-switch {
   margin-bottom: 17px;
 }
 
+.order-mode-switch button,
 .trade-side-switch button {
   min-height: 38px;
   border: 1px solid var(--line);
@@ -2007,6 +2078,18 @@ button:disabled {
   background: #fafbf8;
   font-size: 10px;
   font-weight: 720;
+}
+
+.order-mode-switch button {
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.order-mode-switch button.active {
+  color: var(--green);
+  background: var(--paper-strong);
+  box-shadow: 0 3px 10px rgba(32, 55, 43, 0.08);
 }
 
 .trade-side-switch button.active.buy {
@@ -2074,6 +2157,51 @@ button:disabled {
 .quantity-control input::-webkit-outer-spin-button {
   margin: 0;
   appearance: none;
+}
+
+.limit-price-block {
+  margin-bottom: 13px;
+}
+
+.limit-price-control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  min-height: 42px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fafbf8;
+}
+
+.limit-price-control:focus-within {
+  border-color: rgba(23, 77, 58, 0.4);
+  box-shadow: 0 0 0 3px rgba(23, 77, 58, 0.07);
+}
+
+.limit-price-control.invalid {
+  border-color: rgba(206, 64, 56, 0.4);
+}
+
+.limit-price-control input {
+  min-width: 0;
+  padding: 0 12px;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.limit-price-control > span {
+  display: grid;
+  min-width: 48px;
+  place-items: center;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 760;
 }
 
 .trade-percentage-row {

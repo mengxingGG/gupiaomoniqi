@@ -1,15 +1,18 @@
 import type {
   DailyCheckInStatus,
   DisplayCurrency,
+  LimitOrder,
   MarketMode,
   PortfolioSnapshot,
   PublicAccount,
   Transaction,
 } from "@gupiaomoniqi/shared";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
+  cancelOrder,
   claimDailyCheckIn,
   fetchCheckInStatus,
+  fetchOrders,
   fetchPortfolio,
   fetchTransactions,
   redeemGiftCode,
@@ -17,6 +20,7 @@ import {
 import {
   formatMoney,
   formatNumber,
+  formatQuoteMoney,
   signedClass,
 } from "../format";
 
@@ -38,6 +42,14 @@ export function AccountPage({
   const [portfolio, setPortfolio] =
     useState<PortfolioSnapshot | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [orders, setOrders] = useState<LimitOrder[]>([]);
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(
+    null,
+  );
+  const [orderNotice, setOrderNotice] = useState<{
+    kind: "success" | "error";
+    text: string;
+  } | null>(null);
   const [loading, setLoading] = useState(Boolean(account));
   const [error, setError] = useState<string | null>(null);
   const [checkIn, setCheckIn] =
@@ -50,11 +62,20 @@ export function AccountPage({
     kind: "success" | "error";
     text: string;
   } | null>(null);
+  const dataRequestEpochRef = useRef(0);
+  const accountContextKey = `${account?.id ?? "anonymous"}:${mode}`;
+  const accountContextKeyRef = useRef(accountContextKey);
+  accountContextKeyRef.current = accountContextKey;
 
   useEffect(() => {
+    dataRequestEpochRef.current += 1;
     if (!account) {
       setPortfolio(null);
       setTransactions([]);
+      setOrders([]);
+      setCancellingOrderId(null);
+      setCheckingIn(false);
+      setGiftSubmitting(false);
       setLoading(false);
       return;
     }
@@ -62,21 +83,36 @@ export function AccountPage({
     let active = true;
     setLoading(true);
     setError(null);
+    setCancellingOrderId(null);
+    setCheckingIn(false);
+    setGiftSubmitting(false);
+    setOrderNotice(null);
+    const initialRequestEpoch = ++dataRequestEpochRef.current;
 
     Promise.all([
       fetchPortfolio(mode),
       fetchTransactions(mode),
+      fetchOrders(mode),
       fetchCheckInStatus(),
     ])
-      .then(([nextPortfolio, nextTransactions, nextCheckIn]) => {
-        if (active) {
-          setPortfolio(nextPortfolio);
-          setTransactions(nextTransactions);
-          setCheckIn(nextCheckIn);
-        }
-      })
+      .then(
+        ([nextPortfolio, nextTransactions, nextOrders, nextCheckIn]) => {
+          if (
+            active &&
+            initialRequestEpoch === dataRequestEpochRef.current
+          ) {
+            setPortfolio(nextPortfolio);
+            setTransactions(nextTransactions);
+            setOrders(nextOrders);
+            setCheckIn(nextCheckIn);
+          }
+        },
+      )
       .catch((nextError: unknown) => {
-        if (active) {
+        if (
+          active &&
+          initialRequestEpoch === dataRequestEpochRef.current
+        ) {
           setError(
             nextError instanceof Error
               ? nextError.message
@@ -85,24 +121,72 @@ export function AccountPage({
         }
       })
       .finally(() => {
-        if (active) {
+        if (
+          active &&
+          initialRequestEpoch === dataRequestEpochRef.current
+        ) {
           setLoading(false);
         }
       });
 
+    let refreshTimer: number | undefined;
+    const refreshAccount = async () => {
+      const refreshRequestEpoch = ++dataRequestEpochRef.current;
+      try {
+        const [nextPortfolio, nextTransactions, nextOrders] =
+          await Promise.all([
+            fetchPortfolio(mode),
+            fetchTransactions(mode),
+            fetchOrders(mode),
+          ]);
+        if (
+          active &&
+          refreshRequestEpoch === dataRequestEpochRef.current
+        ) {
+          setPortfolio(nextPortfolio);
+          setTransactions(nextTransactions);
+          setOrders(nextOrders);
+          setLoading(false);
+          setError(null);
+        }
+      } catch {
+        // 保留最后一次成功快照，下一轮继续同步。
+      } finally {
+        if (active) {
+          refreshTimer = window.setTimeout(
+            () => void refreshAccount(),
+            5_000,
+          );
+        }
+      }
+    };
+    refreshTimer = window.setTimeout(
+      () => void refreshAccount(),
+      5_000,
+    );
+
     return () => {
       active = false;
+      dataRequestEpochRef.current += 1;
+      if (refreshTimer !== undefined) {
+        window.clearTimeout(refreshTimer);
+      }
     };
-  }, [account, mode]);
+  }, [account?.id, mode]);
 
   async function handleCheckIn() {
     if (!account || checkingIn || checkIn?.claimed) {
       return;
     }
+    const operationContext = accountContextKey;
     setCheckingIn(true);
     setRewardNotice(null);
     try {
       const result = await claimDailyCheckIn(mode);
+      if (accountContextKeyRef.current !== operationContext) {
+        return;
+      }
+      dataRequestEpochRef.current += 1;
       setPortfolio(result.portfolio);
       setCheckIn({
         date: new Date().toISOString().slice(0, 10),
@@ -116,6 +200,9 @@ export function AccountPage({
         text: `签到成功，${formatMoney(result.amountUsd, displayCurrency)} 已进入${modeLabel(result.mode)}`,
       });
     } catch (nextError) {
+      if (accountContextKeyRef.current !== operationContext) {
+        return;
+      }
       setRewardNotice({
         kind: "error",
         text:
@@ -124,7 +211,9 @@ export function AccountPage({
             : "签到失败",
       });
     } finally {
-      setCheckingIn(false);
+      if (accountContextKeyRef.current === operationContext) {
+        setCheckingIn(false);
+      }
     }
   }
 
@@ -134,6 +223,7 @@ export function AccountPage({
     if (!account || !code || giftSubmitting) {
       return;
     }
+    const operationContext = accountContextKey;
     setGiftSubmitting(true);
     setRewardNotice(null);
     try {
@@ -142,6 +232,10 @@ export function AccountPage({
         code,
         giftRequestKey,
       );
+      if (accountContextKeyRef.current !== operationContext) {
+        return;
+      }
+      dataRequestEpochRef.current += 1;
       setPortfolio(result.portfolio);
       setGiftCode("");
       setGiftRequestKey(newRequestKey());
@@ -150,6 +244,9 @@ export function AccountPage({
         text: `礼包领取成功，${formatMoney(result.amountUsd, displayCurrency)} 已进入${modeLabel(result.mode)}`,
       });
     } catch (nextError) {
+      if (accountContextKeyRef.current !== operationContext) {
+        return;
+      }
       setRewardNotice({
         kind: "error",
         text:
@@ -158,7 +255,52 @@ export function AccountPage({
             : "礼包码领取失败",
       });
     } finally {
-      setGiftSubmitting(false);
+      if (accountContextKeyRef.current === operationContext) {
+        setGiftSubmitting(false);
+      }
+    }
+  }
+
+  async function handleCancelOrder(order: LimitOrder) {
+    if (order.status !== "OPEN" || cancellingOrderId) {
+      return;
+    }
+
+    const operationContext = accountContextKey;
+    dataRequestEpochRef.current += 1;
+    setCancellingOrderId(order.id);
+    setOrderNotice(null);
+    try {
+      const result = await cancelOrder(order.id, mode);
+      if (accountContextKeyRef.current !== operationContext) {
+        return;
+      }
+      dataRequestEpochRef.current += 1;
+      setOrders((current) =>
+        current.map((candidate) =>
+          candidate.id === result.order.id ? result.order : candidate,
+        ),
+      );
+      setPortfolio(result.portfolio);
+      setOrderNotice({
+        kind: "success",
+        text: `${order.name} ${order.side === "BUY" ? "买入" : "卖出"}委托已撤销，冻结资产已释放`,
+      });
+    } catch (nextError) {
+      if (accountContextKeyRef.current !== operationContext) {
+        return;
+      }
+      setOrderNotice({
+        kind: "error",
+        text:
+          nextError instanceof Error
+            ? nextError.message
+            : "撤单失败，请稍后重试",
+      });
+    } finally {
+      if (accountContextKeyRef.current === operationContext) {
+        setCancellingOrderId(null);
+      }
     }
   }
 
@@ -275,7 +417,7 @@ export function AccountPage({
             />
             <AssetCard
               label="可用资金"
-              note="实时可用于市价交易"
+              note={`冻结 ${formatMoney(portfolio.frozenCashUsd, displayCurrency)}`}
               value={formatMoney(
                 portfolio.availableCashUsd,
                 displayCurrency,
@@ -302,6 +444,130 @@ export function AccountPage({
                 displayCurrency,
               )}
             />
+          </section>
+
+          <section className="account-section order-management">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">ORDERS</span>
+                <h2>委托订单</h2>
+              </div>
+              <span>
+                {orders.filter((order) => order.status === "OPEN").length} 笔待成交
+              </span>
+            </div>
+
+            {orderNotice ? (
+              <div className={`inline-notice order-notice ${orderNotice.kind}`}>
+                {orderNotice.text}
+              </div>
+            ) : null}
+
+            {orders.length === 0 ? (
+              <div className="section-empty compact-empty">
+                <strong>暂无委托</strong>
+                <span>市价成交和限价挂单都会记录在这里。</span>
+              </div>
+            ) : (
+              <div className="account-table-wrap">
+                <table className="account-table orders-table">
+                  <thead>
+                    <tr>
+                      <th>股票</th>
+                      <th>委托</th>
+                      <th>价格</th>
+                      <th>成交 / 委托</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders.map((order) => (
+                      <tr
+                        key={order.id}
+                        onClick={() => onOpenStock(order.instrumentId)}
+                      >
+                        <td>
+                          <strong>{order.name}</strong>
+                          <span>
+                            {order.symbol} · {shortDateTime(order.createdAt)}
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            className={`trade-direction ${order.side.toLowerCase()}`}
+                          >
+                            {order.side === "BUY" ? "买入" : "卖出"}
+                          </span>
+                          <span>
+                            {order.orderMode === "LIMIT" ? "限价" : "市价"}
+                          </span>
+                        </td>
+                        <td>
+                          {order.limitPrice === null
+                            ? "市价"
+                            : formatQuoteMoney(
+                                order.limitPrice,
+                                order.quoteCurrency,
+                                displayCurrency,
+                              )}
+                        </td>
+                        <td>
+                          {formatNumber(order.filledQuantity, {
+                            maximumFractionDigits: 0,
+                          })}
+                          <span>
+                            共 {formatNumber(order.quantity, {
+                              maximumFractionDigits: 0,
+                            })} 股
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            className={`order-status ${order.status.toLowerCase()}`}
+                          >
+                            {orderStatusLabel(order.status)}
+                          </span>
+                          {order.status === "OPEN" &&
+                          order.reservedCashUsd > 0 ? (
+                              <span>
+                                冻结{" "}
+                                {formatMoney(
+                                  order.reservedCashUsd,
+                                  displayCurrency,
+                                )}
+                              </span>
+                            ) : null}
+                          {order.status === "OPEN" &&
+                          order.reservedQuantity > 0 ? (
+                              <span>冻结 {order.reservedQuantity} 股</span>
+                            ) : null}
+                        </td>
+                        <td>
+                          {order.status === "OPEN" ? (
+                            <button
+                              className="cancel-order-button"
+                              disabled={cancellingOrderId === order.id}
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleCancelOrder(order);
+                              }}
+                            >
+                              {cancellingOrderId === order.id
+                                ? "撤单中"
+                                : "撤单"}
+                            </button>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
 
           <section className="account-section">
@@ -348,6 +614,9 @@ export function AccountPage({
                             maximumFractionDigits: 0,
                           })}
                           <span>可卖 {position.availableQuantity}</span>
+                          {position.frozenQuantity > 0 ? (
+                            <span>委托冻结 {position.frozenQuantity}</span>
+                          ) : null}
                           {position.pendingSettlementQuantity > 0 ? (
                             <span>
                               待结算{" "}
@@ -520,6 +789,24 @@ function AssetCard({
 
 function modeLabel(mode: MarketMode): string {
   return mode === "REAL" ? "真实行情模拟盘" : "虚拟市场模拟盘";
+}
+
+function orderStatusLabel(status: LimitOrder["status"]): string {
+  return {
+    OPEN: "待成交",
+    FILLED: "已成交",
+    CANCELLED: "已撤单",
+  }[status];
+}
+
+function shortDateTime(value: string): string {
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 function newRequestKey(): string {

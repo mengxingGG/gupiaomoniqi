@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -26,9 +27,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.mengxinggg.gupiaomoniqi.ui.AppUiState
+import com.mengxinggg.gupiaomoniqi.ui.UiOrderMode
 import com.mengxinggg.gupiaomoniqi.ui.UiTradeSide
+import com.mengxinggg.gupiaomoniqi.ui.effectivePriceUsdOrNull
 import com.mengxinggg.gupiaomoniqi.ui.formatMoney
 import com.mengxinggg.gupiaomoniqi.ui.formatQuoteMoney
+import com.mengxinggg.gupiaomoniqi.ui.limitPriceDisplayOrNull
 import com.mengxinggg.gupiaomoniqi.ui.modeLabel
 import com.mengxinggg.gupiaomoniqi.ui.theme.GainRed
 import com.mengxinggg.gupiaomoniqi.ui.theme.LossGreen
@@ -39,6 +43,8 @@ import kotlin.math.max
 fun TradeSheet(
     state: AppUiState,
     onDismiss: () -> Unit,
+    onOrderModeChange: (UiOrderMode) -> Unit,
+    onLimitPriceChange: (String) -> Unit,
     onLotsChange: (Int) -> Unit,
     onPercentage: (Int) -> Unit,
     onSubmit: () -> Unit,
@@ -46,8 +52,9 @@ fun TradeSheet(
     val sheet = state.tradeSheet ?: return
     val stock = sheet.stock
     val quantity = sheet.lots * stock.lotSize
-    val grossQuote = stock.currentPrice * quantity
-    val grossUsd = if (stock.quoteCurrency == "CNY") grossQuote / 7.0 else grossQuote
+    val limitPrice = sheet.limitPriceDisplayOrNull()
+    val effectivePriceUsd = sheet.effectivePriceUsdOrNull() ?: 0.0
+    val grossUsd = effectivePriceUsd * quantity
     val feeUsd = max(1.0, grossUsd * 0.0003)
     val sideColor = if (sheet.side == UiTradeSide.BUY) GainRed else LossGreen
 
@@ -68,9 +75,39 @@ fun TradeSheet(
                     fontWeight = FontWeight.Black,
                 )
                 Text(
-                    "${stock.symbol} · ${modeLabel(state.mode)} · 市价单",
+                    "${stock.symbol} · ${modeLabel(state.mode)} · ${sheet.orderMode.label}单",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                UiOrderMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = sheet.orderMode == mode,
+                        onClick = { onOrderModeChange(mode) },
+                        enabled = !state.tradeBusy,
+                        label = { Text("${mode.label}交易") },
+                    )
+                }
+            }
+
+            if (sheet.orderMode == UiOrderMode.LIMIT) {
+                OutlinedTextField(
+                    value = sheet.limitPriceInput,
+                    onValueChange = onLimitPriceChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !state.tradeBusy,
+                    label = { Text("限价（${sheet.limitPriceCurrency.name}）") },
+                    supportingText = {
+                        Text(
+                            "按当前显示币种输入，提交时自动换算为 " +
+                                stock.quoteCurrency,
+                        )
+                    },
+                    isError = sheet.limitPriceInput.isNotBlank() && limitPrice == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
                 )
             }
 
@@ -91,12 +128,16 @@ fun TradeSheet(
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "参考价",
+                        if (sheet.orderMode == UiOrderMode.LIMIT) "委托价" else "参考价",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelMedium,
                     )
                     Text(
-                        formatQuoteMoney(stock, stock.currentPrice, state.displayCurrency),
+                        if (sheet.orderMode == UiOrderMode.LIMIT) {
+                            formatMoney(effectivePriceUsd, state.displayCurrency)
+                        } else {
+                            formatQuoteMoney(stock, stock.currentPrice, state.displayCurrency)
+                        },
                         fontWeight = FontWeight.Bold,
                     )
                 }
@@ -161,7 +202,10 @@ fun TradeSheet(
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
                     Row {
-                        Text("预计成交额", modifier = Modifier.weight(1f))
+                        Text(
+                            if (sheet.orderMode == UiOrderMode.LIMIT) "预计委托额" else "预计成交额",
+                            modifier = Modifier.weight(1f),
+                        )
                         Text(
                             formatMoney(grossUsd, state.displayCurrency),
                             fontWeight = FontWeight.Bold,
@@ -172,7 +216,11 @@ fun TradeSheet(
                         Text(formatMoney(feeUsd, state.displayCurrency))
                     }
                     Text(
-                        "实际成交价与费用以服务端权威结果为准。",
+                        if (sheet.orderMode == UiOrderMode.LIMIT) {
+                            "限价单可能立即成交，也可能进入委托列表等待撮合。"
+                        } else {
+                            "实际成交价与费用以服务端权威结果为准。"
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -206,7 +254,9 @@ fun TradeSheet(
 
             Button(
                 onClick = onSubmit,
-                enabled = sheet.lots in 1..sheet.maxLots && !state.tradeBusy,
+                enabled = sheet.lots in 1..sheet.maxLots &&
+                    (sheet.orderMode != UiOrderMode.LIMIT || limitPrice != null) &&
+                    !state.tradeBusy,
                 modifier = Modifier.fillMaxWidth(),
                 colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                     containerColor = sideColor,
@@ -216,7 +266,8 @@ fun TradeSheet(
                     if (state.tradeBusy) {
                         "正在提交…"
                     } else {
-                        "确认${if (sheet.side == UiTradeSide.BUY) "买入" else "卖出"} $quantity 股"
+                        "确认${if (sheet.side == UiTradeSide.BUY) "买入" else "卖出"} " +
+                            "$quantity 股 · ${sheet.orderMode.label}"
                     },
                 )
             }

@@ -29,6 +29,7 @@ try {
   backgroundStartTimer = setTimeout(() => {
     backgroundStartTimer = null;
     context.aiRuntime.start();
+    context.llmTradingRuntime?.start();
     context.realRuntime.start();
   }, 1_000);
   backgroundStartTimer.unref();

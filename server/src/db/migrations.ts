@@ -143,6 +143,9 @@ CREATE TABLE IF NOT EXISTS ai_traders (
   activity_level integer NOT NULL CHECK (activity_level BETWEEN 1 AND 10),
   preferred_market text NOT NULL
     CHECK (preferred_market IN ('CN', 'HK', 'US', 'UK')),
+  trader_kind text NOT NULL DEFAULT 'RULE'
+    CHECK (trader_kind IN ('RULE', 'LLM')),
+  persona_key text,
   is_active boolean NOT NULL DEFAULT true,
   last_action_at timestamptz,
   next_action_at timestamptz NOT NULL,
@@ -154,6 +157,23 @@ CREATE TABLE IF NOT EXISTS ai_traders (
 
 CREATE INDEX IF NOT EXISTS ai_traders_next_action_index
   ON ai_traders (is_active, next_action_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ai_traders_persona_key_unique
+  ON ai_traders (persona_key)
+  WHERE persona_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS ai_trader_decisions (
+  id uuid PRIMARY KEY,
+  trader_id uuid NOT NULL REFERENCES ai_traders(id) ON DELETE CASCADE,
+  decided_at timestamptz NOT NULL,
+  action text NOT NULL,
+  instrument_id text,
+  result text NOT NULL,
+  reason text,
+  model_id text NOT NULL,
+  detail text
+);
+CREATE INDEX IF NOT EXISTS ai_trader_decisions_trader_time_index
+  ON ai_trader_decisions (trader_id, decided_at DESC);
 
 CREATE TABLE IF NOT EXISTS positions (
   id uuid PRIMARY KEY,
@@ -197,6 +217,42 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE INDEX IF NOT EXISTS transactions_portfolio_created_index
   ON transactions (portfolio_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id uuid PRIMARY KEY,
+  portfolio_id uuid NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+  instrument_id text NOT NULL REFERENCES instruments(id),
+  side text NOT NULL CHECK (side IN ('BUY', 'SELL')),
+  order_mode text NOT NULL CHECK (order_mode IN ('MARKET', 'LIMIT')),
+  status text NOT NULL CHECK (status IN ('OPEN', 'FILLED', 'CANCELLED')),
+  quantity integer NOT NULL CHECK (quantity > 0),
+  filled_quantity integer NOT NULL DEFAULT 0 CHECK (filled_quantity >= 0),
+  limit_price numeric(24, 4),
+  quote_currency text NOT NULL CHECK (quote_currency IN ('CNY', 'USD')),
+  reserved_cash_usd numeric(24, 2) NOT NULL DEFAULT 0,
+  reserved_quantity integer NOT NULL DEFAULT 0,
+  actor_type text NOT NULL DEFAULT 'USER' CHECK (actor_type IN ('USER', 'AI')),
+  actor_id text NOT NULL,
+  idempotency_key text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  filled_at timestamptz,
+  cancelled_at timestamptz,
+  transaction_id uuid REFERENCES transactions(id) ON DELETE SET NULL,
+  CHECK (
+    (order_mode = 'MARKET' AND limit_price IS NULL) OR
+    (order_mode = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0)
+  ),
+  CHECK (filled_quantity <= quantity)
+);
+
+CREATE INDEX IF NOT EXISTS orders_portfolio_created_index
+  ON orders (portfolio_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS orders_open_instrument_index
+  ON orders (status, instrument_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS orders_portfolio_idempotency_unique
+  ON orders (portfolio_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS position_settlement_lots (
   id uuid PRIMARY KEY,
@@ -515,6 +571,66 @@ const AI_TRANSACTIONLESS_SETTLEMENT_MIGRATION = [
     ALTER COLUMN source_transaction_id DROP NOT NULL`,
 ];
 
+const LIMIT_ORDERS_MIGRATION = [
+  `CREATE TABLE IF NOT EXISTS orders (
+    id uuid PRIMARY KEY,
+    portfolio_id uuid NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    instrument_id text NOT NULL REFERENCES instruments(id),
+    side text NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    order_mode text NOT NULL CHECK (order_mode IN ('MARKET', 'LIMIT')),
+    status text NOT NULL CHECK (status IN ('OPEN', 'FILLED', 'CANCELLED')),
+    quantity integer NOT NULL CHECK (quantity > 0),
+    filled_quantity integer NOT NULL DEFAULT 0 CHECK (filled_quantity >= 0),
+    limit_price numeric(24, 4),
+    quote_currency text NOT NULL CHECK (quote_currency IN ('CNY', 'USD')),
+    reserved_cash_usd numeric(24, 2) NOT NULL DEFAULT 0,
+    reserved_quantity integer NOT NULL DEFAULT 0,
+    actor_type text NOT NULL DEFAULT 'USER' CHECK (actor_type IN ('USER', 'AI')),
+    actor_id text NOT NULL,
+    idempotency_key text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    filled_at timestamptz,
+    cancelled_at timestamptz,
+    transaction_id uuid REFERENCES transactions(id) ON DELETE SET NULL,
+    CHECK (
+      (order_mode = 'MARKET' AND limit_price IS NULL) OR
+      (order_mode = 'LIMIT' AND limit_price IS NOT NULL AND limit_price > 0)
+    ),
+    CHECK (filled_quantity <= quantity)
+  )`,
+  `CREATE INDEX IF NOT EXISTS orders_portfolio_created_index
+    ON orders (portfolio_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS orders_open_instrument_index
+    ON orders (status, instrument_id, created_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS orders_portfolio_idempotency_unique
+    ON orders (portfolio_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL`,
+];
+
+const LLM_TRADERS_MIGRATION = [
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS trader_kind text NOT NULL DEFAULT 'RULE'`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS persona_key text`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS ai_traders_persona_key_unique
+    ON ai_traders (persona_key)
+    WHERE persona_key IS NOT NULL`,
+  `CREATE TABLE IF NOT EXISTS ai_trader_decisions (
+    id uuid PRIMARY KEY,
+    trader_id uuid NOT NULL REFERENCES ai_traders(id) ON DELETE CASCADE,
+    decided_at timestamptz NOT NULL,
+    action text NOT NULL,
+    instrument_id text,
+    result text NOT NULL,
+    reason text,
+    model_id text NOT NULL,
+    detail text
+  )`,
+  `CREATE INDEX IF NOT EXISTS ai_trader_decisions_trader_time_index
+    ON ai_trader_decisions (trader_id, decided_at DESC)`,
+];
+
 export async function migrateDatabase(client: PGlite): Promise<void> {
   await client.exec(INITIAL_SCHEMA);
   for (const statement of ACCOUNT_LEDGER_MIGRATION) {
@@ -523,34 +639,21 @@ export async function migrateDatabase(client: PGlite): Promise<void> {
   for (const statement of AI_AND_SETTLEMENT_MIGRATION) {
     await client.exec(statement);
   }
-  const historyApplied = await hasMigration(client, 5);
-  if (!historyApplied) {
-    for (const statement of MARKET_HISTORY_MIGRATION) {
-      await client.exec(statement);
-    }
-  }
-  const dayBackfillApplied = await hasMigration(client, 6);
-  if (!dayBackfillApplied) {
-    await client.exec(MARKET_DAY_BACKFILL_MIGRATION);
-  }
-  const dayCanonicalizationApplied = await hasMigration(client, 7);
-  if (!dayCanonicalizationApplied) {
-    for (const statement of DAY_BUCKET_CANONICALIZATION_MIGRATION) {
-      await client.exec(statement);
-    }
-  }
-  const accountFeaturesApplied = await hasMigration(client, 8);
-  if (!accountFeaturesApplied) {
-    for (const statement of ACCOUNT_FEATURES_MIGRATION) {
-      await client.exec(statement);
-    }
-  }
-  const aiTransactionlessSettlementApplied = await hasMigration(client, 9);
-  if (!aiTransactionlessSettlementApplied) {
-    for (const statement of AI_TRANSACTIONLESS_SETTLEMENT_MIGRATION) {
-      await client.exec(statement);
-    }
-  }
+  await runVersionedMigration(client, 5, MARKET_HISTORY_MIGRATION);
+  await runVersionedMigration(client, 6, [MARKET_DAY_BACKFILL_MIGRATION]);
+  await runVersionedMigration(
+    client,
+    7,
+    DAY_BUCKET_CANONICALIZATION_MIGRATION,
+  );
+  await runVersionedMigration(client, 8, ACCOUNT_FEATURES_MIGRATION);
+  await runVersionedMigration(
+    client,
+    9,
+    AI_TRANSACTIONLESS_SETTLEMENT_MIGRATION,
+  );
+  await runVersionedMigration(client, 10, LIMIT_ORDERS_MIGRATION);
+  await runVersionedMigration(client, 11, LLM_TRADERS_MIGRATION);
   await client.query(
     `INSERT INTO schema_migrations (version)
      VALUES (1)
@@ -571,42 +674,27 @@ export async function migrateDatabase(client: PGlite): Promise<void> {
      VALUES (4)
      ON CONFLICT (version) DO NOTHING`,
   );
-  await client.query(
-    `INSERT INTO schema_migrations (version)
-     VALUES (5)
-     ON CONFLICT (version) DO NOTHING`,
-  );
-  await client.query(
-    `INSERT INTO schema_migrations (version)
-     VALUES (6)
-     ON CONFLICT (version) DO NOTHING`,
-  );
-  await client.query(
-    `INSERT INTO schema_migrations (version)
-     VALUES (7)
-     ON CONFLICT (version) DO NOTHING`,
-  );
-  await client.query(
-    `INSERT INTO schema_migrations (version)
-     VALUES (8)
-     ON CONFLICT (version) DO NOTHING`,
-  );
-  await client.query(
-    `INSERT INTO schema_migrations (version)
-     VALUES (9)
-     ON CONFLICT (version) DO NOTHING`,
-  );
 }
 
-async function hasMigration(
+async function runVersionedMigration(
   client: PGlite,
   version: number,
-): Promise<boolean> {
-  const result = await client.query<{ present: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM schema_migrations WHERE version = $1
-     ) AS present`,
-    [version],
-  );
-  return result.rows[0]?.present ?? false;
+  statements: readonly string[],
+): Promise<void> {
+  await client.transaction(async (transaction) => {
+    const applied = await transaction.query<{ version: number }>(
+      `SELECT version FROM schema_migrations WHERE version = $1`,
+      [version],
+    );
+    if (applied.rows.length > 0) {
+      return;
+    }
+    for (const statement of statements) {
+      await transaction.exec(statement);
+    }
+    await transaction.query(
+      `INSERT INTO schema_migrations (version) VALUES ($1)`,
+      [version],
+    );
+  });
 }

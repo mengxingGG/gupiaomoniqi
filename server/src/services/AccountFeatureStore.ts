@@ -9,6 +9,7 @@ import type { PGlite } from "@electric-sql/pglite";
 
 export const WATCHLIST_LIMIT = 200;
 export const DAILY_CHECK_IN_REWARD_USD = 100_000;
+const REAL_WATCHLIST_PRIORITY_SCORE = 30_000;
 
 export interface WatchlistRecord {
   accountId: string;
@@ -164,7 +165,7 @@ export class DatabaseAccountFeatureStore
     return new Map(
       result.rows.map((row) => [
         row.instrument_id,
-        row.watchers * 10_000,
+        row.watchers * REAL_WATCHLIST_PRIORITY_SCORE,
       ]),
     );
   }
@@ -403,7 +404,8 @@ export class MemoryAccountFeatureStore
       if (item.mode === "REAL") {
         counts.set(
           item.instrumentId,
-          (counts.get(item.instrumentId) ?? 0) + 10_000,
+          (counts.get(item.instrumentId) ?? 0) +
+            REAL_WATCHLIST_PRIORITY_SCORE,
         );
       }
     }

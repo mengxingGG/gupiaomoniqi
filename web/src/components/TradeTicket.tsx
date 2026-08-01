@@ -6,23 +6,31 @@ import {
   type DisplayCurrency,
   type MarketItem,
   type MarketMode,
+  type OrderMode,
+  type OrderSubmissionResult,
   type PortfolioSnapshot,
-  type TradeResult,
   type TradeSide,
 } from "@gupiaomoniqi/shared";
 import {
   type FormEvent,
-  useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import { executeTrade } from "../api";
+import { submitOrder } from "../api";
 import {
   formatMoney,
   formatPercent,
   formatQuoteMoney,
   signedClass,
 } from "../format";
+import {
+  displayPriceToQuote,
+  editablePrice,
+  parsePositivePrice,
+  reconcileLimitPriceInput,
+} from "../tradeMath";
 
 const PERCENTAGES = [25, 50, 75, 100] as const;
 
@@ -33,7 +41,7 @@ interface TradeTicketProps {
   authenticated: boolean;
   mode: MarketMode;
   onRequireAuth: () => void;
-  onCompleted: (result: TradeResult) => void;
+  onCompleted: (result: OrderSubmissionResult) => void;
 }
 
 export function TradeTicket({
@@ -46,40 +54,77 @@ export function TradeTicket({
   onCompleted,
 }: TradeTicketProps) {
   const [side, setSide] = useState<TradeSide>("BUY");
+  const [orderMode, setOrderMode] = useState<OrderMode>("MARKET");
+  const [limitPriceInput, setLimitPriceInput] = useState(() =>
+    reconcileLimitPriceInput({
+      currentInput: "",
+      userEdited: false,
+      previousDisplayCurrency: displayCurrency,
+      displayCurrency,
+      currentQuotePrice: item.quote.currentPrice,
+      quoteCurrency: item.quote.quoteCurrency,
+    }),
+  );
+  const [limitPriceEdited, setLimitPriceEdited] = useState(false);
   const [lots, setLots] = useState(1);
+  const [requestKey, setRequestKey] = useState(newRequestKey);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     text: string;
   } | null>(null);
+  const previousDisplayCurrencyRef = useRef(displayCurrency);
+  const previousInstrumentIdRef = useRef(item.instrument.id);
   const position = portfolio?.positions.find(
     (itemPosition) =>
       itemPosition.instrumentId === item.instrument.id,
   );
   const quantity = lots * item.instrument.lotSize;
+  const parsedLimitDisplayPrice =
+    orderMode === "LIMIT"
+      ? parsePositivePrice(limitPriceInput)
+      : null;
+  const limitPriceQuote =
+    parsedLimitDisplayPrice === null
+      ? null
+      : displayPriceToQuote(
+          parsedLimitDisplayPrice,
+          displayCurrency,
+          item.quote.quoteCurrency,
+        );
+  const orderPriceUsd =
+    orderMode === "MARKET"
+      ? quotePriceToUsd(
+          item.quote.currentPrice,
+          item.quote.quoteCurrency,
+        )
+      : limitPriceQuote === null
+        ? null
+        : quotePriceToUsd(
+            limitPriceQuote,
+            item.quote.quoteCurrency,
+          );
   const unitLotUsd = useMemo(
-    () =>
-      quotePriceToUsd(
-        item.quote.currentPrice,
-        item.quote.quoteCurrency,
-      ) * item.instrument.lotSize,
-    [
-      item.instrument.lotSize,
-      item.quote.currentPrice,
-      item.quote.quoteCurrency,
-    ],
+    () => (orderPriceUsd ?? 0) * item.instrument.lotSize,
+    [item.instrument.lotSize, orderPriceUsd],
   );
   const estimatedGrossUsd = unitLotUsd * lots;
-  const estimatedFeeUsd = Math.max(
-    MINIMUM_TRADE_FEE_USD,
-    estimatedGrossUsd * VIRTUAL_TRADE_FEE_RATE,
-  );
+  const estimatedFeeUsd =
+    orderPriceUsd === null
+      ? 0
+      : Math.max(
+          MINIMUM_TRADE_FEE_USD,
+          estimatedGrossUsd * VIRTUAL_TRADE_FEE_RATE,
+        );
   const estimatedSettlementUsd =
     side === "BUY"
       ? estimatedGrossUsd + estimatedFeeUsd
       : Math.max(0, estimatedGrossUsd - estimatedFeeUsd);
+  const invalidLimitPrice =
+    orderMode === "LIMIT" && parsedLimitDisplayPrice === null;
   const insufficientCash =
     side === "BUY" &&
+    !invalidLimitPrice &&
     Boolean(
       portfolio &&
         estimatedSettlementUsd > portfolio.availableCashUsd,
@@ -91,20 +136,98 @@ export function TradeTicket({
         quantity > (position?.availableQuantity ?? 0),
     );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (previousInstrumentIdRef.current === item.instrument.id) {
+      return;
+    }
+
+    previousInstrumentIdRef.current = item.instrument.id;
+    previousDisplayCurrencyRef.current = displayCurrency;
     setLots(1);
+    setOrderMode("MARKET");
+    setLimitPriceEdited(false);
+    setLimitPriceInput(
+      reconcileLimitPriceInput({
+        currentInput: "",
+        userEdited: false,
+        previousDisplayCurrency: displayCurrency,
+        displayCurrency,
+        currentQuotePrice: item.quote.currentPrice,
+        quoteCurrency: item.quote.quoteCurrency,
+      }),
+    );
+    setRequestKey(newRequestKey());
     setNotice(null);
-  }, [item.instrument.id, item.instrument.lotSize]);
+  }, [displayCurrency, item.instrument.id, item.quote.currentPrice, item.quote.quoteCurrency]);
+
+  useLayoutEffect(() => {
+    const previousDisplayCurrency = previousDisplayCurrencyRef.current;
+    previousDisplayCurrencyRef.current = displayCurrency;
+    const displayCurrencyChanged =
+      previousDisplayCurrency !== displayCurrency;
+
+    if (submitting && !displayCurrencyChanged) {
+      return;
+    }
+
+    const nextInput = reconcileLimitPriceInput({
+      currentInput: limitPriceInput,
+      userEdited: limitPriceEdited,
+      previousDisplayCurrency,
+      displayCurrency,
+      currentQuotePrice: item.quote.currentPrice,
+      quoteCurrency: item.quote.quoteCurrency,
+    });
+
+    if (nextInput === limitPriceInput) {
+      return;
+    }
+
+    setLimitPriceInput(nextInput);
+    setRequestKey(newRequestKey());
+    if (displayCurrencyChanged) {
+      setNotice(null);
+    }
+  }, [
+    displayCurrency,
+    item.quote.currentPrice,
+    item.quote.quoteCurrency,
+    limitPriceEdited,
+    limitPriceInput,
+    submitting,
+  ]);
+
+  function changed(): void {
+    setRequestKey(newRequestKey());
+    setNotice(null);
+  }
 
   function changeSide(nextSide: TradeSide) {
     setSide(nextSide);
     setLots(1);
-    setNotice(null);
+    changed();
+  }
+
+  function changeOrderMode(nextMode: OrderMode) {
+    setOrderMode(nextMode);
+    if (nextMode === "LIMIT" && !limitPriceEdited) {
+      setLimitPriceInput(
+        reconcileLimitPriceInput({
+          currentInput: limitPriceInput,
+          userEdited: false,
+          previousDisplayCurrency: displayCurrency,
+          displayCurrency,
+          currentQuotePrice: item.quote.currentPrice,
+          quoteCurrency: item.quote.quoteCurrency,
+        }),
+      );
+    }
+    changed();
   }
 
   function changeLots(direction: -1 | 1) {
     setLots((current) => Math.max(1, current + direction));
-    setNotice(null);
+    changed();
   }
 
   function applyPercentage(percent: number) {
@@ -114,6 +237,10 @@ export function TradeTicket({
     }
 
     if (side === "BUY") {
+      if (invalidLimitPrice) {
+        setNotice({ kind: "error", text: "请先输入有效限价" });
+        return;
+      }
       const budgetUsd =
         portfolio.availableCashUsd * (percent / 100);
       const nextLots = maximumAffordableLots(
@@ -151,6 +278,7 @@ export function TradeTicket({
       setLots(nextLots);
     }
 
+    setRequestKey(newRequestKey());
     setNotice(null);
   }
 
@@ -161,37 +289,54 @@ export function TradeTicket({
       onRequireAuth();
       return;
     }
+    if (
+      invalidLimitPrice ||
+      (orderMode === "LIMIT" && limitPriceQuote === null)
+    ) {
+      setNotice({ kind: "error", text: "请输入大于 0 的有效限价" });
+      return;
+    }
 
     setSubmitting(true);
     setNotice(null);
 
     try {
-      const result = await executeTrade(
+      const result = await submitOrder(
         {
           instrumentId: item.instrument.id,
           side,
           quantity,
-          orderMode: "MARKET",
-          idempotencyKey:
-            typeof crypto.randomUUID === "function"
-              ? crypto.randomUUID()
-              : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          orderMode,
+          limitPrice:
+            orderMode === "LIMIT"
+              ? (limitPriceQuote ?? undefined)
+              : undefined,
+          idempotencyKey: requestKey,
         },
         mode,
       );
       onCompleted(result);
-      setNotice({
-        kind: "success",
-        text:
-          side === "BUY" &&
-          item.instrument.settlementCycle === "T1"
-            ? `买入成交 ${lots} 手（${quantity} 股），下一交易日可卖`
-            : `${side === "BUY" ? "买入" : "卖出"}成交 ${lots} 手（${quantity} 股）`,
-      });
+      setRequestKey(newRequestKey());
+
+      if (result.order.status === "OPEN") {
+        setNotice({
+          kind: "success",
+          text: `${side === "BUY" ? "买入" : "卖出"}限价委托已挂出，等待行情触发`,
+        });
+      } else {
+        setNotice({
+          kind: "success",
+          text:
+            side === "BUY" &&
+            item.instrument.settlementCycle === "T1"
+              ? `买入成交 ${lots} 手（${quantity} 股），下一交易日可卖`
+              : `${side === "BUY" ? "买入" : "卖出"}成交 ${lots} 手（${quantity} 股）`,
+        });
+      }
     } catch (error) {
       setNotice({
         kind: "error",
-        text: error instanceof Error ? error.message : "交易失败",
+        text: error instanceof Error ? error.message : "下单失败",
       });
     } finally {
       setSubmitting(false);
@@ -202,8 +347,8 @@ export function TradeTicket({
     <section className="trade-ticket">
       <div className="panel-title-row">
         <div>
-          <span className="eyebrow">ORDER · MARKET</span>
-          <h3>市价交易</h3>
+          <span className="eyebrow">ORDER · {orderMode}</span>
+          <h3>{orderMode === "MARKET" ? "市价交易" : "限价委托"}</h3>
         </div>
         <span className="simulation-chip">
           {mode === "REAL" ? "真实价 · " : ""}
@@ -232,6 +377,23 @@ export function TradeTicket({
         </div>
       </div>
 
+      <div className="order-mode-switch" aria-label="订单类型">
+        <button
+          className={orderMode === "MARKET" ? "active" : ""}
+          type="button"
+          onClick={() => changeOrderMode("MARKET")}
+        >
+          市价
+        </button>
+        <button
+          className={orderMode === "LIMIT" ? "active" : ""}
+          type="button"
+          onClick={() => changeOrderMode("LIMIT")}
+        >
+          限价
+        </button>
+      </div>
+
       <div className="trade-side-switch">
         <button
           className={side === "BUY" ? "active buy" : ""}
@@ -250,11 +412,38 @@ export function TradeTicket({
       </div>
 
       <form onSubmit={submit}>
+        {orderMode === "LIMIT" ? (
+          <div className="limit-price-block">
+            <div className="quantity-heading">
+              <label htmlFor="trade-limit-price">委托价格</label>
+              <span>以当前显示币种输入</span>
+            </div>
+            <div
+              className={`limit-price-control ${invalidLimitPrice ? "invalid" : ""}`}
+            >
+              <input
+                id="trade-limit-price"
+                aria-invalid={invalidLimitPrice}
+                aria-label={`限价（${displayCurrency}）`}
+                inputMode="decimal"
+                min="0.0001"
+                step="0.0001"
+                type="number"
+                value={limitPriceInput}
+                onChange={(event) => {
+                  setLimitPriceInput(event.target.value);
+                  setLimitPriceEdited(true);
+                  changed();
+                }}
+              />
+              <span>{displayCurrency}</span>
+            </div>
+          </div>
+        ) : null}
+
         <div className="quantity-heading">
           <label htmlFor="trade-lots">手数（手）</label>
-          <span>
-            1 手 = {item.instrument.lotSize} 股
-          </span>
+          <span>1 手 = {item.instrument.lotSize} 股</span>
         </div>
         <div className="quantity-control">
           <button
@@ -277,7 +466,7 @@ export function TradeTicket({
 
               if (Number.isFinite(next)) {
                 setLots(Math.max(1, Math.floor(next)));
-                setNotice(null);
+                changed();
               }
             }}
           />
@@ -291,9 +480,7 @@ export function TradeTicket({
         </div>
 
         <div className="trade-percentage-row">
-          <span>
-            {side === "BUY" ? "使用可用资金" : "卖出可卖持仓"}
-          </span>
+          <span>{side === "BUY" ? "使用可用资金" : "卖出可卖持仓"}</span>
           <div>
             {PERCENTAGES.map((percent) => (
               <button
@@ -313,38 +500,49 @@ export function TradeTicket({
 
         <dl className="ticket-summary">
           <div>
-            <dt>{side === "BUY" ? "预计扣款" : "预计到账"}</dt>
+            <dt>
+              {orderMode === "LIMIT"
+                ? side === "BUY"
+                  ? "预计冻结"
+                  : "预计成交净额"
+                : side === "BUY"
+                  ? "预计扣款"
+                  : "预计到账"}
+            </dt>
             <dd>
-              {formatMoney(
-                estimatedSettlementUsd,
-                displayCurrency,
-              )}
+              {invalidLimitPrice
+                ? "—"
+                : formatMoney(estimatedSettlementUsd, displayCurrency)}
             </dd>
           </div>
           <div>
             <dt>预计手续费</dt>
-            <dd>{formatMoney(estimatedFeeUsd, displayCurrency)}</dd>
+            <dd>
+              {invalidLimitPrice
+                ? "—"
+                : formatMoney(estimatedFeeUsd, displayCurrency)}
+            </dd>
           </div>
           <div>
-            <dt>可用资金</dt>
+            <dt>可用 / 冻结资金</dt>
             <dd>
               {portfolio
-                ? formatMoney(
-                    portfolio.availableCashUsd,
-                    displayCurrency,
-                  )
+                ? `${formatMoney(portfolio.availableCashUsd, displayCurrency)} / ${formatMoney(portfolio.frozenCashUsd, displayCurrency)}`
                 : "注册后查看"}
             </dd>
           </div>
           <div>
-            <dt>持仓 / 可卖</dt>
+            <dt>持仓 / 可卖 / 冻结</dt>
             <dd>
-              {position?.quantity ?? 0} /{" "}
-              {position?.availableQuantity ?? 0} 股
+              {position?.quantity ?? 0} / {position?.availableQuantity ?? 0} /{" "}
+              {position?.frozenQuantity ?? 0} 股
             </dd>
           </div>
         </dl>
 
+        {invalidLimitPrice ? (
+          <div className="inline-notice error">请输入大于 0 的有效限价</div>
+        ) : null}
         {insufficientCash ? (
           <div className="inline-notice error">可用资金不足</div>
         ) : null}
@@ -357,9 +555,7 @@ export function TradeTicket({
           </div>
         ) : null}
         {notice ? (
-          <div className={`inline-notice ${notice.kind}`}>
-            {notice.text}
-          </div>
+          <div className={`inline-notice ${notice.kind}`}>{notice.text}</div>
         ) : null}
 
         <button
@@ -369,6 +565,7 @@ export function TradeTicket({
             !Number.isSafeInteger(lots) ||
             !Number.isSafeInteger(quantity) ||
             lots < 1 ||
+            invalidLimitPrice ||
             insufficientCash ||
             insufficientPosition
           }
@@ -377,15 +574,19 @@ export function TradeTicket({
           {!authenticated
             ? "注册或登录后交易"
             : submitting
-              ? "正在撮合…"
-              : `确认${side === "BUY" ? "买入" : "卖出"} · 市价`}
+              ? orderMode === "MARKET"
+                ? "正在撮合…"
+                : "正在提交委托…"
+              : `${orderMode === "MARKET" ? "确认" : "提交"}${side === "BUY" ? "买入" : "卖出"} · ${orderMode === "MARKET" ? "市价" : "限价"}`}
         </button>
       </form>
 
       <p className="transaction-note">
-        {mode === "REAL"
-          ? "行情来自真实市场；资金、持仓与成交只写入独立模拟账本，不会连接券商。"
-          : "虚拟盘遵循统一撮合、手续费、整手和 T+0/T+1 规则。"}
+        {orderMode === "LIMIT"
+          ? "限价委托会冻结对应资金或可卖持仓，可在账户页撤单。"
+          : mode === "REAL"
+            ? "行情来自真实市场；资金、持仓与成交只写入独立模拟账本。"
+            : "虚拟盘遵循统一撮合、手续费、整手和 T+0/T+1 规则。"}
       </p>
     </section>
   );
@@ -398,4 +599,10 @@ function marketLabel(market: MarketItem["instrument"]["market"]): string {
     US: "美股",
     UK: "英股",
   }[market];
+}
+
+function newRequestKey(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }

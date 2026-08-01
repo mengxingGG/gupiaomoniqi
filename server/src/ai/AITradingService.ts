@@ -125,6 +125,8 @@ export class AITradingService {
           riskLevel,
           activityLevel,
           preferredMarket: MARKETS[(sequence - 1) % MARKETS.length]!,
+          traderKind: "RULE",
+          personaKey: null,
           isActive: true,
           lastActionAt: null,
           nextActionAt: new Date(
@@ -781,7 +783,11 @@ export class AITradingService {
 
   #listAITraders(): AITraderRecord[] {
     if (!this.#tradersLoaded) {
-      this.#upsertTraderStates(this.repository.listAITraders());
+      this.#upsertTraderStates(
+        this.repository
+          .listAITraders()
+          .filter((trader) => trader.traderKind !== "LLM"),
+      );
       this.#tradersLoaded = true;
     }
     return [...this.#volatileTraders.values()].map((trader) => ({
