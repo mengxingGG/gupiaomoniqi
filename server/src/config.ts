@@ -69,10 +69,15 @@ export const SERVER_CONFIG = {
 } as const;
 
 export const SECURITY_CONFIG = {
-  allowedOrigins: csvList(process.env.CORS_ALLOWED_ORIGINS, [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-  ]),
+  allowedOrigins: [
+    ...new Set([
+      "https://gupiaomoniqi.org",
+      ...csvList(process.env.CORS_ALLOWED_ORIGINS, [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+      ]),
+    ]),
+  ],
 } as const;
 
 export const REAL_MARKET_CONFIG = {

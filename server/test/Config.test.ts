@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   REAL_MARKET_CONFIG,
+  SECURITY_CONFIG,
   recommendVirtualRuntimeProfile,
 } from "../src/config.js";
 
@@ -23,5 +24,13 @@ describe("real market runtime defaults", () => {
     expect(REAL_MARKET_CONFIG.fullSweepTargetMs).toBe(300_000);
     expect(REAL_MARKET_CONFIG.hotRefreshIntervalMs).toBe(1_000);
     expect(REAL_MARKET_CONFIG.hotPagesPerRound).toBe(1);
+  });
+});
+
+describe("fixed production origin", () => {
+  it("默认允许正式域名访问 API", () => {
+    expect(SECURITY_CONFIG.allowedOrigins).toContain(
+      "https://gupiaomoniqi.org",
+    );
   });
 });

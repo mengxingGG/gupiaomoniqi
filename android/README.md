@@ -28,4 +28,13 @@ sdk.dir=C\:\\Users\\你的用户名\\AppData\\Local\\Android\\Sdk
 
 ## 本地开发网络
 
-客户端允许访问局域网 HTTP 开发服务；对外部署和应用内更新请使用 HTTPS。服务器地址可在登录页设置中修改。
+正式包固定使用 `https://gupiaomoniqi.org`，用户界面不提供服务器地址输入或切换功能。
+
+调试包需要连接局域网服务时，可通过 ADB 临时覆盖：
+
+```powershell
+adb shell am start -n com.mengxinggg.gupiaomoniqi/.MainActivity `
+  --es debug_server_url http://192.168.1.20:3100
+```
+
+该入口受 `BuildConfig.DEBUG` 保护，正式包会忽略覆盖参数。应用内更新始终要求 HTTPS 且与固定服务同源。

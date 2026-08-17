@@ -261,11 +261,8 @@ fun StockSimulatorApp() {
         if (state.settingsOpen) {
             ServerSettingsSheet(
                 currentUrl = state.serverUrl,
-                error = state.serverError,
-                saving = state.serverSaving,
                 updateState = updateState,
                 onDismiss = viewModel::closeSettings,
-                onSave = viewModel::saveServerUrl,
                 onUpdateAction = {
                     if (updateState.downloadedApkPath != null) {
                         updateManager.requestInstallAgain()

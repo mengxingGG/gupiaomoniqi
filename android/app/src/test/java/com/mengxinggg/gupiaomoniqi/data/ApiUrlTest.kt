@@ -6,6 +6,11 @@ import org.junit.Test
 
 class ApiUrlTest {
     @Test
+    fun `production service uses the fixed official domain`() {
+        assertEquals("https://gupiaomoniqi.org", PRODUCTION_BASE_URL)
+    }
+
+    @Test
     fun `normalizes bare IP http and https server addresses`() {
         assertEquals(
             "http://192.168.1.20:3100",

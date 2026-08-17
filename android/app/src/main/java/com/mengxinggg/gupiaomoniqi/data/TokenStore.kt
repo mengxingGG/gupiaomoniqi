@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import com.mengxinggg.gupiaomoniqi.BuildConfig
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import java.util.Base64
@@ -13,6 +14,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 const val DEFAULT_BASE_URL = ""
+const val PRODUCTION_BASE_URL = "https://gupiaomoniqi.org"
 
 /**
  * Small, substitutable session/settings boundary. ApiClient depends on this
@@ -73,18 +75,27 @@ class EncryptedTokenStore(
 
     override var baseUrl: String
         get() = synchronized(lock) {
+            if (!BuildConfig.DEBUG) {
+                return@synchronized PRODUCTION_BASE_URL
+            }
             val stored = decryptPreference(BASE_URL_KEY)
+                ?.takeIf(String::isNotBlank)
             if (stored == null) {
-                DEFAULT_BASE_URL
+                PRODUCTION_BASE_URL
             } else {
                 runCatching { ApiUrl.normalizeOptionalBaseUrl(stored) }
-                    .getOrDefault(DEFAULT_BASE_URL)
+                    .getOrDefault(PRODUCTION_BASE_URL)
             }
         }
         set(value) = synchronized(lock) {
+            val effectiveValue = if (BuildConfig.DEBUG) {
+                ApiUrl.normalizeOptionalBaseUrl(value)
+            } else {
+                PRODUCTION_BASE_URL
+            }
             writeEncrypted(
                 BASE_URL_KEY,
-                ApiUrl.normalizeOptionalBaseUrl(value),
+                effectiveValue,
             )
         }
 

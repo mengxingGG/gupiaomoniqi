@@ -58,8 +58,7 @@ HTTP 地址仅允许本机或可信局域网；公网模型接口请使用 HTTPS
 
 ## Android
 
-Android 客户端位于 `android/`，可在应用设置中填写服务器地址。正式 APK 随 GitHub Release 提供，应用也可从设置页检查服务器更新。
-公网服务器请使用 HTTPS 地址；HTTP 仅用于可信局域网环境。
+Android 客户端位于 `android/`，生产服务地址固定为 `https://gupiaomoniqi.org`，普通用户无需填写或切换服务器。正式 APK 随 GitHub Release 提供，应用也可从设置页检查服务器更新。
 
 构建环境：
 
