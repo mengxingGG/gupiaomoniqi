@@ -17,10 +17,10 @@ export class MarketDetailService {
     private readonly candleService?: CandleService,
   ) {}
 
-  getChart(
+  async getChart(
     instrumentId: string,
     range: ChartRange,
-  ): ChartSeries | undefined {
+  ): Promise<ChartSeries | undefined> {
     return this.candleService?.getChart(instrumentId, range);
   }
 

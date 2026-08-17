@@ -10,6 +10,7 @@ import com.mengxinggg.gupiaomoniqi.model.ChartSeries
 import com.mengxinggg.gupiaomoniqi.model.ChartSource
 import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
+import com.mengxinggg.gupiaomoniqi.model.EmailVerificationRequestResult
 import com.mengxinggg.gupiaomoniqi.model.Instrument
 import com.mengxinggg.gupiaomoniqi.model.InstrumentType
 import com.mengxinggg.gupiaomoniqi.model.IndustryCount
@@ -25,6 +26,8 @@ import com.mengxinggg.gupiaomoniqi.model.Page
 import com.mengxinggg.gupiaomoniqi.model.Portfolio
 import com.mengxinggg.gupiaomoniqi.model.Position
 import com.mengxinggg.gupiaomoniqi.model.PublicAccount
+import com.mengxinggg.gupiaomoniqi.model.PasswordResetConfirmResult
+import com.mengxinggg.gupiaomoniqi.model.PasswordResetRequestResult
 import com.mengxinggg.gupiaomoniqi.model.Quote
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimState
@@ -73,10 +76,28 @@ object JsonCodec {
     fun publicAccount(json: JSONObject): PublicAccount = PublicAccount(
         id = json.getString("id"),
         username = json.getString("username"),
+        email = json.nullableString("email"),
         displayName = json.getString("displayName"),
         displayCurrency = json.enum("displayCurrency"),
         createdAt = json.getString("createdAt"),
     )
+
+    fun passwordResetRequest(json: JSONObject): PasswordResetRequestResult =
+        PasswordResetRequestResult(
+            accepted = json.getBoolean("accepted"),
+            expiresInSeconds = json.getInt("expiresInSeconds"),
+        )
+
+    fun passwordResetConfirm(json: JSONObject): PasswordResetConfirmResult =
+        PasswordResetConfirmResult(
+            reset = json.getBoolean("reset"),
+        )
+
+    fun emailVerificationRequest(json: JSONObject): EmailVerificationRequestResult =
+        EmailVerificationRequestResult(
+            accepted = json.getBoolean("accepted"),
+            expiresInSeconds = json.getInt("expiresInSeconds"),
+        )
 
     fun instrument(json: JSONObject): Instrument = Instrument(
         id = json.getString("id"),

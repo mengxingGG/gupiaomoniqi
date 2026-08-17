@@ -12,6 +12,58 @@ import { PortfolioService } from "../src/services/PortfolioService.js";
 import { TradeService } from "../src/services/TradeService.js";
 
 describe("DatabaseGameRepository", () => {
+  it("启动只热加载每个 K 线序列的最新快照，历史按需读取", async () => {
+    const client = new PGlite();
+    await client.waitReady;
+    const connection = {
+      client,
+      db: drizzle({ client, schema }),
+    };
+
+    try {
+      await migrateDatabase(client);
+      await seedDatabase(client);
+      const values = Array.from({ length: 300 }, (_, index) => ({
+        instrument_id: "cn-600519",
+        interval: "MINUTE",
+        bucket_start: new Date(
+          Date.UTC(2026, 7, 17, 0, index),
+        ).toISOString(),
+        open: 1_890,
+        high: 1_891,
+        low: 1_889,
+        close: 1_890,
+        volume: 100,
+        source: "MARKET_TICK",
+        is_partial: false,
+        updated_at: "2026-08-17T12:00:00.000Z",
+      }));
+      await client.query(
+        `INSERT INTO candles (
+           instrument_id, interval, bucket_start, open, high, low, close,
+           volume, source, is_partial, updated_at
+         )
+         SELECT instrument_id, interval, bucket_start, open, high, low, close,
+                volume, source, is_partial, updated_at
+           FROM jsonb_to_recordset($1::jsonb) AS x(
+             instrument_id text, interval text, bucket_start timestamptz,
+             open numeric, high numeric, low numeric, close numeric,
+             volume bigint, source text, is_partial boolean,
+             updated_at timestamptz
+           )`,
+        [JSON.stringify(values)],
+      );
+
+      const repository = await DatabaseGameRepository.create(connection);
+      expect(repository.listCandles("cn-600519", "MINUTE")).toHaveLength(1);
+      await expect(
+        repository.loadCandles("cn-600519", "MINUTE", 240),
+      ).resolves.toHaveLength(240);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("并发奖励入账不会被使用旧快照的交易覆盖", async () => {
     const client = new PGlite();
     await client.waitReady;
@@ -27,6 +79,7 @@ describe("DatabaseGameRepository", () => {
       const clock = () => new Date("2026-07-27T12:00:00.000Z");
       const auth = await new AuthService(repository, clock).register({
         username: "cash_race_trader",
+        email: "cash_race_trader@example.com",
         displayName: "并发资金测试员",
         password: "ValidPass123",
       });
@@ -112,6 +165,7 @@ describe("DatabaseGameRepository", () => {
       const authService = new AuthService(repository, clock);
       const auth = await authService.register({
         username: "database_trader",
+        email: "database_trader@example.com",
         displayName: "数据库交易员",
         password: "ValidPass123",
       });

@@ -1,6 +1,8 @@
 import type { PGlite } from "@electric-sql/pglite";
 
-const VIRTUAL_MINUTE_RETENTION_DAYS = 3;
+const VIRTUAL_MINUTE_CANDLE_LIMIT = 240;
+const VIRTUAL_MINUTE_MAX_AGE_HOURS = 24;
+const VIRTUAL_DAY_CANDLE_LIMIT = 4_500;
 const AI_TRANSACTION_RETENTION_DAYS = 30;
 const SETTLED_LOT_RETENTION_DAYS = 7;
 const IMPORT_BATCH_RETENTION_DAYS = 14;
@@ -11,8 +13,11 @@ const REAL_DAY_CANDLE_LIMIT = 800;
 export interface StorageMaintenanceResult {
   virtual?: {
     deletedExpiredSessions: number;
+    deletedExpiredPasswordResetChallenges: number;
+    deletedExpiredEmailVerificationChallenges: number;
     deletedOldAiDecisions: number;
     deletedOldAiTransactions: number;
+    deletedOldAiOrders: number;
     deletedOldMinuteCandles: number;
     deletedSettledLots: number;
     deletedOldImportBatches: number;
@@ -61,6 +66,20 @@ async function pruneVirtualStorage(
         WHERE expires_at < $1`,
       [toIso(now)],
     ),
+    deletedExpiredPasswordResetChallenges: await deleteCount(
+      client,
+      `DELETE FROM password_reset_challenges
+        WHERE expires_at < $1
+           OR (consumed_at IS NOT NULL AND consumed_at < $2)`,
+      [toIso(now), toIso(addDays(now, -1))],
+    ),
+    deletedExpiredEmailVerificationChallenges: await deleteCount(
+      client,
+      `DELETE FROM email_verification_challenges
+        WHERE expires_at < $1
+           OR (consumed_at IS NOT NULL AND consumed_at < $2)`,
+      [toIso(now), toIso(addDays(now, -1))],
+    ),
     deletedOldAiDecisions: await deleteCount(
       client,
       `DELETE FROM ai_trader_decisions
@@ -87,13 +106,20 @@ async function pruneVirtualStorage(
           )`,
       [toIso(addDays(now, -AI_TRANSACTION_RETENTION_DAYS))],
     ),
-    deletedOldMinuteCandles: await deleteCount(
+    deletedOldAiOrders: await deleteCount(
       client,
-      `DELETE FROM candles
-        WHERE interval = 'MINUTE'
-          AND bucket_start < $1`,
-      [toIso(addDays(now, -VIRTUAL_MINUTE_RETENTION_DAYS))],
+      `DELETE FROM orders
+        WHERE status <> 'OPEN'
+          AND created_at < $1
+          AND EXISTS (
+            SELECT 1
+              FROM portfolios
+             WHERE portfolios.id = orders.portfolio_id
+               AND portfolios.account_id IS NULL
+          )`,
+      [toIso(addDays(now, -AI_TRANSACTION_RETENTION_DAYS))],
     ),
+    deletedOldMinuteCandles: await trimVirtualMinuteCandles(client, now),
     deletedOldImportBatches: await deleteCount(
       client,
       `DELETE FROM market_import_batches
@@ -108,6 +134,7 @@ async function pruneVirtualStorage(
     vacuumed: false,
     checkpointed: false,
   };
+  await trimVirtualCandles(client, "DAY", VIRTUAL_DAY_CANDLE_LIMIT);
   const compacted = await compactDatabase(client, deep);
   result.vacuumed = compacted.vacuumed;
   result.checkpointed = compacted.checkpointed;
@@ -182,16 +209,71 @@ async function trimRealCandles(
   );
 }
 
+async function trimVirtualMinuteCandles(
+  client: PGlite,
+  now: Date,
+): Promise<number> {
+  const cutoff = new Date(
+    now.getTime() - VIRTUAL_MINUTE_MAX_AGE_HOURS * 60 * 60 * 1_000,
+  );
+  const expired = await deleteCount(
+    client,
+    `DELETE FROM candles
+      WHERE interval = 'MINUTE' AND bucket_start < $1`,
+    [toIso(cutoff)],
+  );
+  return (
+    expired +
+    (await trimVirtualCandles(
+      client,
+      "MINUTE",
+      VIRTUAL_MINUTE_CANDLE_LIMIT,
+    ))
+  );
+}
+
+async function trimVirtualCandles(
+  client: PGlite,
+  interval: "MINUTE" | "DAY",
+  limit: number,
+): Promise<number> {
+  return deleteCount(
+    client,
+    `WITH ranked AS (
+       SELECT instrument_id, interval, bucket_start,
+              row_number() OVER (
+                PARTITION BY instrument_id, interval
+                ORDER BY bucket_start DESC
+              ) AS rn
+         FROM candles
+        WHERE interval = $1
+     )
+     DELETE FROM candles
+      WHERE EXISTS (
+        SELECT 1
+          FROM ranked
+         WHERE ranked.instrument_id = candles.instrument_id
+           AND ranked.interval = candles.interval
+           AND ranked.bucket_start = candles.bucket_start
+           AND ranked.rn > $2
+      )`,
+    [interval, limit],
+  );
+}
+
 async function deleteCount(
   client: PGlite,
   sql: string,
   params: readonly unknown[],
 ): Promise<number> {
   const result = await client.query<{ deleted_count: number }>(
-    `${sql} RETURNING 1`,
+    `WITH deleted_rows AS (
+       ${sql} RETURNING 1
+     )
+     SELECT count(*)::int AS deleted_count FROM deleted_rows`,
     [...params],
   );
-  return result.rows.length;
+  return result.rows[0]?.deleted_count ?? 0;
 }
 
 async function compactDatabase(client: PGlite, deep = false): Promise<{

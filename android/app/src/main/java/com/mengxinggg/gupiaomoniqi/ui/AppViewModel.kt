@@ -109,6 +109,7 @@ class AppViewModel(
     private var chartJob: Job? = null
     private var modeMappingJob: Job? = null
     private var authJob: Job? = null
+    private var emailCompletionJob: Job? = null
     private var tradeJob: Job? = null
     private var liveRefreshJob: Job? = null
     private var liveRefreshRequested = false
@@ -118,6 +119,7 @@ class AppViewModel(
     private val ordersCapability = OrdersEndpointCapability()
     private var serverEpoch = 0L
     private var sessionEpoch = 0L
+    private var emailCompletionRequestId = 0L
     private var marketRequestId = 0L
     private var industriesRequestId = 0L
     private var detailRequestId = 0L
@@ -474,6 +476,7 @@ class AppViewModel(
                 returnScreen = if (state.screen == AppScreen.AUTH) AppScreen.MAIN else state.screen,
                 screen = AppScreen.AUTH,
                 authError = null,
+                authNotice = null,
             )
         }
     }
@@ -485,13 +488,26 @@ class AppViewModel(
             it.copy(
                 screen = it.returnScreen,
                 authError = null,
+                authNotice = null,
+                authResetCodeSent = false,
                 authBusy = false,
             )
         }
     }
 
     fun changeAuthMode(mode: AuthMode) {
-        _uiState.update { it.copy(authMode = mode, authError = null) }
+        _uiState.update {
+            it.copy(
+                authMode = mode,
+                authError = null,
+                authNotice = null,
+                authResetCodeSent = if (mode == AuthMode.RESET) {
+                    it.authResetCodeSent
+                } else {
+                    false
+                },
+            )
+        }
     }
 
     fun accountAction() {
@@ -660,6 +676,7 @@ class AppViewModel(
     fun authenticate(
         mode: AuthMode,
         username: String,
+        email: String,
         displayName: String,
         password: String,
     ) {
@@ -668,17 +685,22 @@ class AppViewModel(
             return
         }
         if (_uiState.value.authBusy) return
-        if (username.isBlank() || password.isBlank() || (mode == AuthMode.REGISTER && displayName.isBlank())) {
+        if (
+            mode == AuthMode.RESET ||
+            username.isBlank() ||
+            password.isBlank() ||
+            (mode == AuthMode.REGISTER && (displayName.isBlank() || email.isBlank()))
+        ) {
             _uiState.update { it.copy(authError = "请完整填写账户信息。") }
             return
         }
         val requestEpoch = ++sessionEpoch
         giftAttempt = null
-        _uiState.update { it.copy(authBusy = true, authError = null) }
+        _uiState.update { it.copy(authBusy = true, authError = null, authNotice = null) }
         authJob = viewModelScope.launch {
             runCatching {
                 if (mode == AuthMode.REGISTER) {
-                    repository.register(username, password, displayName)
+                    repository.register(username, email, password, displayName)
                 } else {
                     repository.login(username, password)
                 }
@@ -692,6 +714,10 @@ class AppViewModel(
                         sessionRestoring = false,
                         authBusy = false,
                         authError = null,
+                        emailCompletionBusy = false,
+                        emailCompletionCodeSent = false,
+                        emailCompletionError = null,
+                        emailCompletionNotice = null,
                         transientMessage = if (mode == AuthMode.REGISTER) {
                             "注册成功，两个模拟盘已准备就绪。"
                         } else {
@@ -713,6 +739,192 @@ class AppViewModel(
         }
     }
 
+    fun requestPasswordReset(email: String) {
+        if (!_uiState.value.serverConfigured) {
+            openSettings()
+            return
+        }
+        if (_uiState.value.authBusy) return
+        if (email.isBlank()) {
+            _uiState.update { it.copy(authError = "请输入绑定邮箱。") }
+            return
+        }
+        val requestEpoch = ++sessionEpoch
+        _uiState.update {
+            it.copy(authBusy = true, authError = null, authNotice = null)
+        }
+        authJob = viewModelScope.launch {
+            runCatching {
+                repository.requestPasswordReset(email.trim())
+            }.onSuccess {
+                if (sessionEpoch != requestEpoch) return@onSuccess
+                _uiState.update {
+                    it.copy(
+                        authBusy = false,
+                        authError = null,
+                        authNotice = "如果该邮箱已绑定账户，六位验证码已经发出，有效期 10 分钟。",
+                        authResetCodeSent = true,
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (sessionEpoch != requestEpoch) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        authBusy = false,
+                        authError = error.userMessage("验证码发送失败，请稍后再试"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun confirmPasswordReset(
+        email: String,
+        code: String,
+        newPassword: String,
+    ) {
+        if (_uiState.value.authBusy) return
+        if (email.isBlank() || !code.matches(Regex("^\\d{6}$")) || newPassword.isBlank()) {
+            _uiState.update { it.copy(authError = "请完整填写邮箱、六位验证码和新密码。") }
+            return
+        }
+        val requestEpoch = ++sessionEpoch
+        _uiState.update {
+            it.copy(authBusy = true, authError = null, authNotice = null)
+        }
+        authJob = viewModelScope.launch {
+            runCatching {
+                repository.confirmPasswordReset(email.trim(), code, newPassword)
+            }.onSuccess {
+                if (sessionEpoch != requestEpoch) return@onSuccess
+                _uiState.update {
+                    it.copy(
+                        authMode = AuthMode.LOGIN,
+                        authBusy = false,
+                        authError = null,
+                        authNotice = "密码已重置，旧登录会话已失效。请用用户名或邮箱登录。",
+                        authResetCodeSent = false,
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (sessionEpoch != requestEpoch) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        authBusy = false,
+                        authError = error.userMessage("验证码无效或已过期"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun requestEmailCompletion(email: String) {
+        val state = _uiState.value
+        if (state.account == null || state.account.email != null) return
+        if (state.emailCompletionBusy) return
+        if (email.isBlank()) {
+            _uiState.update {
+                it.copy(emailCompletionError = "请输入要绑定的找回邮箱。")
+            }
+            return
+        }
+        val requestId = ++emailCompletionRequestId
+        _uiState.update {
+            it.copy(
+                emailCompletionBusy = true,
+                emailCompletionError = null,
+                emailCompletionNotice = null,
+            )
+        }
+        emailCompletionJob = viewModelScope.launch {
+            runCatching {
+                repository.requestEmailVerification(email.trim())
+            }.onSuccess {
+                if (requestId != emailCompletionRequestId) return@onSuccess
+                _uiState.update {
+                    it.copy(
+                        emailCompletionBusy = false,
+                        emailCompletionCodeSent = true,
+                        emailCompletionError = null,
+                        emailCompletionNotice = "六位验证码已经发出，有效期 10 分钟。请检查收件箱和垃圾邮件。",
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (requestId != emailCompletionRequestId) return@onFailure
+                if (handleSessionExpiry(error)) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        emailCompletionBusy = false,
+                        emailCompletionError = error.userMessage("验证码发送失败，请稍后再试"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun confirmEmailCompletion(email: String, code: String) {
+        val state = _uiState.value
+        if (state.account == null || state.account.email != null) return
+        if (state.emailCompletionBusy) return
+        if (email.isBlank() || !code.matches(Regex("^\\d{6}$"))) {
+            _uiState.update {
+                it.copy(emailCompletionError = "请填写有效邮箱和六位数字验证码。")
+            }
+            return
+        }
+        val requestId = ++emailCompletionRequestId
+        _uiState.update {
+            it.copy(
+                emailCompletionBusy = true,
+                emailCompletionError = null,
+            )
+        }
+        emailCompletionJob = viewModelScope.launch {
+            runCatching {
+                repository.confirmEmailVerification(email.trim(), code)
+            }.onSuccess { account ->
+                if (requestId != emailCompletionRequestId) return@onSuccess
+                _uiState.update {
+                    it.copy(
+                        account = account.toUi(),
+                        emailCompletionBusy = false,
+                        emailCompletionCodeSent = false,
+                        emailCompletionError = null,
+                        emailCompletionNotice = null,
+                        transientMessage = "找回邮箱已验证并绑定。",
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                if (requestId != emailCompletionRequestId) return@onFailure
+                if (handleSessionExpiry(error)) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        emailCompletionBusy = false,
+                        emailCompletionError = error.userMessage("验证码无效或已过期"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun changeEmailCompletionAddress() {
+        if (_uiState.value.emailCompletionBusy) return
+        emailCompletionRequestId += 1
+        emailCompletionJob?.cancel()
+        emailCompletionJob = null
+        _uiState.update {
+            it.copy(
+                emailCompletionCodeSent = false,
+                emailCompletionError = null,
+                emailCompletionNotice = null,
+            )
+        }
+    }
+
     fun logout() {
         val state = _uiState.value
         if (state.tradeBusy || state.rewardBusy || state.cancellingOrderId != null) {
@@ -722,6 +934,9 @@ class AppViewModel(
             return
         }
         val requestEpoch = ++sessionEpoch
+        emailCompletionRequestId += 1
+        emailCompletionJob?.cancel()
+        emailCompletionJob = null
         pendingTrade = null
         giftAttempt = null
         activeTradeAttemptId = null
@@ -736,6 +951,10 @@ class AppViewModel(
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,
+                emailCompletionBusy = false,
+                emailCompletionCodeSent = false,
+                emailCompletionError = null,
+                emailCompletionNotice = null,
                 selectedTab = MainTab.MARKET,
                 screen = AppScreen.MAIN,
                 accountLoading = false,
@@ -1155,6 +1374,10 @@ class AppViewModel(
                             account = account.toUi(),
                             displayCurrency = account.displayCurrency.toUiDisplay(),
                             sessionRestoring = false,
+                            emailCompletionBusy = false,
+                            emailCompletionCodeSent = false,
+                            emailCompletionError = null,
+                            emailCompletionNotice = null,
                         )
                     }
                     loadUserData(openPendingTrade = pendingTrade != null)
@@ -2147,6 +2370,9 @@ class AppViewModel(
             )
         }
         sessionEpoch += 1
+        emailCompletionRequestId += 1
+        emailCompletionJob?.cancel()
+        emailCompletionJob = null
         giftAttempt = null
         watchlistRequestId += 1
         accountRequestId += 1
@@ -2176,6 +2402,10 @@ class AppViewModel(
                 screen = AppScreen.AUTH,
                 authBusy = false,
                 authError = "登录状态已过期，请重新登录。",
+                emailCompletionBusy = false,
+                emailCompletionCodeSent = false,
+                emailCompletionError = null,
+                emailCompletionNotice = null,
             )
         }
         return true
@@ -2245,6 +2475,7 @@ private fun UiOrderMode.toModel(): OrderMode = OrderMode.valueOf(name)
 
 private fun PublicAccount.toUi(): AccountUi = AccountUi(
     username = username,
+    email = email,
     displayName = displayName,
 )
 

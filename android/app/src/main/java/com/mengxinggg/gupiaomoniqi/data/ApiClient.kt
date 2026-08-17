@@ -6,6 +6,7 @@ import com.mengxinggg.gupiaomoniqi.model.ChartRange
 import com.mengxinggg.gupiaomoniqi.model.ChartSeries
 import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
+import com.mengxinggg.gupiaomoniqi.model.EmailVerificationRequestResult
 import com.mengxinggg.gupiaomoniqi.model.IndustryCount
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
 import com.mengxinggg.gupiaomoniqi.model.MarketMode
@@ -18,6 +19,8 @@ import com.mengxinggg.gupiaomoniqi.model.OrderSubmissionResult
 import com.mengxinggg.gupiaomoniqi.model.Page
 import com.mengxinggg.gupiaomoniqi.model.Portfolio
 import com.mengxinggg.gupiaomoniqi.model.PublicAccount
+import com.mengxinggg.gupiaomoniqi.model.PasswordResetConfirmResult
+import com.mengxinggg.gupiaomoniqi.model.PasswordResetRequestResult
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
 import com.mengxinggg.gupiaomoniqi.model.Transaction
@@ -303,11 +306,13 @@ class ApiClient(
 
     fun register(
         username: String,
+        email: String,
         password: String,
         displayName: String,
     ): AuthResult {
         val body = JSONObject()
             .put("username", username)
+            .put("email", email)
             .put("password", password)
             .put("displayName", displayName)
         val decoded = requestObjectWithExecution(
@@ -333,6 +338,51 @@ class ApiClient(
         )
         return storeAuthResult(decoded)
     }
+
+    fun requestPasswordReset(email: String): PasswordResetRequestResult =
+        requestObject(
+            method = "POST",
+            path = "/api/auth/password-reset/request",
+            body = JSONObject().put("email", email),
+            includeAuth = false,
+            decode = JsonCodec::passwordResetRequest,
+        )
+
+    fun confirmPasswordReset(
+        email: String,
+        code: String,
+        newPassword: String,
+    ): PasswordResetConfirmResult = requestObject(
+        method = "POST",
+        path = "/api/auth/password-reset/confirm",
+        body = JSONObject()
+            .put("email", email)
+            .put("code", code)
+            .put("newPassword", newPassword),
+        includeAuth = false,
+        decode = JsonCodec::passwordResetConfirm,
+    )
+
+    fun requestEmailVerification(
+        email: String,
+    ): EmailVerificationRequestResult = requestObject(
+        method = "POST",
+        path = "/api/account/email-verification/request",
+        body = JSONObject().put("email", email),
+        decode = JsonCodec::emailVerificationRequest,
+    )
+
+    fun confirmEmailVerification(
+        email: String,
+        code: String,
+    ): PublicAccount = requestObject(
+        method = "POST",
+        path = "/api/account/email-verification/confirm",
+        body = JSONObject()
+            .put("email", email)
+            .put("code", code),
+        decode = JsonCodec::publicAccount,
+    )
 
     fun me(): PublicAccount = requestObject(
         path = "/api/auth/me",

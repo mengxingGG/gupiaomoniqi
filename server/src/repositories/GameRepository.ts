@@ -27,6 +27,8 @@ export interface AccountRecord {
   id: string;
   username: string;
   usernameNormalized: string;
+  email: string | null;
+  emailNormalized: string | null;
   passwordHash: string;
   displayName: string;
   displayCurrency: DisplayCurrency;
@@ -75,6 +77,28 @@ export interface TradeCommit {
   transaction?: Transaction;
   settlementLot?: SettlementLotRecord;
   order?: OrderRecord;
+}
+
+export interface PasswordResetChallengeRecord {
+  id: string;
+  accountId: string;
+  codeHash: string;
+  expiresAt: string;
+  attemptsRemaining: number;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
+export interface EmailVerificationChallengeRecord {
+  id: string;
+  accountId: string;
+  email: string;
+  emailNormalized: string;
+  codeHash: string;
+  expiresAt: string;
+  attemptsRemaining: number;
+  consumedAt: string | null;
+  createdAt: string;
 }
 
 export interface OrderRecord extends LimitOrder {
@@ -159,6 +183,11 @@ export interface GameRepository {
     instrumentId: string,
     interval: CandleInterval,
   ): CandleRecord[];
+  loadCandles?(
+    instrumentId: string,
+    interval: CandleInterval,
+    limit: number,
+  ): Promise<CandleRecord[]>;
   getLatestCandle?(
     instrumentId: string,
     interval: CandleInterval,
@@ -168,7 +197,19 @@ export interface GameRepository {
   createAccount(commit: CreateAccountCommit): Promise<void>;
   getAccountById(accountId: string): AccountRecord | undefined;
   getAccountByUsername(usernameNormalized: string): AccountRecord | undefined;
+  getAccountByEmail(emailNormalized: string): AccountRecord | undefined;
   updateLastLogin(accountId: string, at: string): Promise<void>;
+  resetPassword(
+    accountId: string,
+    passwordHash: string,
+    challengeId?: string,
+  ): Promise<void>;
+  bindAccountEmail(
+    accountId: string,
+    email: string,
+    emailNormalized: string,
+    challengeId: string,
+  ): Promise<void>;
   updateDisplayCurrency(
     accountId: string,
     currency: DisplayCurrency,
@@ -177,6 +218,36 @@ export interface GameRepository {
   createSession(session: SessionRecord): Promise<void>;
   getSession(tokenHash: string): SessionRecord | undefined;
   deleteSession(tokenHash: string): Promise<void>;
+
+  replacePasswordResetChallenge(
+    challenge: PasswordResetChallengeRecord,
+  ): Promise<void>;
+  getPasswordResetChallenge(
+    accountId: string,
+  ): PasswordResetChallengeRecord | undefined;
+  updatePasswordResetChallenge(
+    challenge: PasswordResetChallengeRecord,
+  ): Promise<void>;
+  recordPasswordResetFailure(
+    accountId: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number>;
+
+  replaceEmailVerificationChallenge(
+    challenge: EmailVerificationChallengeRecord,
+  ): Promise<void>;
+  getEmailVerificationChallenge(
+    accountId: string,
+  ): EmailVerificationChallengeRecord | undefined;
+  updateEmailVerificationChallenge(
+    challenge: EmailVerificationChallengeRecord,
+  ): Promise<void>;
+  recordEmailVerificationFailure(
+    accountId: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number>;
 
   getPortfolioByAccountId(accountId: string): PortfolioRecord | undefined;
   getPortfolioById(portfolioId: string): PortfolioRecord | undefined;

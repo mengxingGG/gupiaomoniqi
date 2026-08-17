@@ -20,8 +20,8 @@ describe("virtual runtime profile", () => {
 describe("real market runtime defaults", () => {
   it("全市场轮询采用低并发稳定档，自选热页仍保持秒级刷新", () => {
     expect(REAL_MARKET_CONFIG.concurrency).toBe(2);
-    expect(REAL_MARKET_CONFIG.fullSweepTargetMs).toBe(60_000);
+    expect(REAL_MARKET_CONFIG.fullSweepTargetMs).toBe(300_000);
     expect(REAL_MARKET_CONFIG.hotRefreshIntervalMs).toBe(1_000);
-    expect(REAL_MARKET_CONFIG.hotPagesPerRound).toBe(2);
+    expect(REAL_MARKET_CONFIG.hotPagesPerRound).toBe(1);
   });
 });

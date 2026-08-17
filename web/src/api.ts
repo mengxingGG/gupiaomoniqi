@@ -5,6 +5,7 @@ import type {
   ChartRange,
   ChartSeries,
   DisplayCurrency,
+  EmailVerificationRequestResult,
   DailyCheckInStatus,
   IndustrySummary,
   LimitOrder,
@@ -15,6 +16,8 @@ import type {
   OrderStatus,
   OrderSubmissionResult,
   PaginatedData,
+  PasswordResetConfirmResult,
+  PasswordResetRequestResult,
   PortfolioSnapshot,
   PublicAccount,
   RealMarketStatus,
@@ -76,6 +79,7 @@ export function storeAuth(auth: StoredAuth | null): void {
 
 export function register(input: {
   username: string;
+  email: string;
   password: string;
   displayName: string;
 }): Promise<AuthResult> {
@@ -212,6 +216,59 @@ export function executeTrade(
     method: "POST",
     body: JSON.stringify({ ...trade, mode }),
   });
+}
+
+export function requestPasswordReset(
+  email: string,
+): Promise<PasswordResetRequestResult> {
+  return request<PasswordResetRequestResult>(
+    "/api/auth/password-reset/request",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+    false,
+  );
+}
+
+export function confirmPasswordReset(input: {
+  email: string;
+  code: string;
+  newPassword: string;
+}): Promise<PasswordResetConfirmResult> {
+  return request<PasswordResetConfirmResult>(
+    "/api/auth/password-reset/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    false,
+  );
+}
+
+export function requestEmailVerification(
+  email: string,
+): Promise<EmailVerificationRequestResult> {
+  return request<EmailVerificationRequestResult>(
+    "/api/account/email-verification/request",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+  );
+}
+
+export function confirmEmailVerification(input: {
+  email: string;
+  code: string;
+}): Promise<PublicAccount> {
+  return request<PublicAccount>(
+    "/api/account/email-verification/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export function fetchIndustries(

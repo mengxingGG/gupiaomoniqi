@@ -35,6 +35,7 @@ const MARKETS: StockMarket[] = ["CN", "HK", "US", "UK"];
 const STARTUP_RECOVERY_DELAY_MS = 1_000;
 const STARTUP_RECOVERY_WINDOW_MS = 60_000;
 const TRADERS_PER_EVENT_LOOP_YIELD = 8;
+const BUY_CANDIDATE_SAMPLE_SIZE = 48;
 const PSYCHOLOGIES = [
   "纪律型",
   "耐心型",
@@ -64,6 +65,11 @@ export class AITradingService {
   #lastRound: AIRoundResult | null = null;
   readonly #recentTradeTimes: number[] = [];
   readonly #volatileTraders = new Map<string, AITraderRecord>();
+  #tradableInstruments: InstrumentRecord[] | null = null;
+  readonly #tradableInstrumentsByMarket = new Map<
+    StockMarket,
+    InstrumentRecord[]
+  >();
   #tradersLoaded = false;
   #startupScheduleRecovered = false;
 
@@ -561,14 +567,14 @@ export class AITradingService {
       ]),
     );
     const preferred = this.random() < 0.72;
-    const candidates = this.repository
-      .listInstruments()
-      .filter(
-        (instrument) =>
-          instrument.isTradable &&
-          (!preferred ||
-            instrument.market === trader.preferredMarket),
-      )
+    const pool = this.#candidatePool(
+      preferred ? trader.preferredMarket : undefined,
+    );
+    const candidates = sampleCandidates(
+      pool,
+      BUY_CANDIDATE_SAMPLE_SIZE,
+      this.random,
+    )
       .map((instrument) => {
         const quote = this.repository.getQuote(instrument.id);
 
@@ -603,6 +609,26 @@ export class AITradingService {
       Math.pow(this.random(), 2) * shortlist.length,
     );
     return shortlist[pick]?.instrument;
+  }
+
+  #candidatePool(market?: StockMarket): InstrumentRecord[] {
+    if (!this.#tradableInstruments) {
+      this.#tradableInstruments = this.repository
+        .listInstruments()
+        .filter((instrument) => instrument.isTradable);
+      for (const candidateMarket of MARKETS) {
+        this.#tradableInstrumentsByMarket.set(
+          candidateMarket,
+          this.#tradableInstruments.filter(
+            (instrument) => instrument.market === candidateMarket,
+          ),
+        );
+      }
+    }
+
+    return market
+      ? (this.#tradableInstrumentsByMarket.get(market) ?? [])
+      : this.#tradableInstruments;
   }
 
   #buyScore(
@@ -790,9 +816,7 @@ export class AITradingService {
       );
       this.#tradersLoaded = true;
     }
-    return [...this.#volatileTraders.values()].map((trader) => ({
-      ...trader,
-    }));
+    return [...this.#volatileTraders.values()];
   }
 
   #spreadStaleStartupSchedule(
@@ -868,6 +892,36 @@ function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => {
     setImmediate(resolve);
   });
+}
+
+function sampleCandidates<T>(
+  pool: readonly T[],
+  maximum: number,
+  random: () => number,
+): T[] {
+  if (pool.length <= maximum) {
+    return [...pool];
+  }
+
+  const start = Math.floor(random() * pool.length);
+  let stride = Math.max(1, Math.floor(random() * (pool.length - 1)) + 1);
+  while (greatestCommonDivisor(stride, pool.length) !== 1) {
+    stride = stride === pool.length - 1 ? 1 : stride + 1;
+  }
+
+  return Array.from(
+    { length: maximum },
+    (_, index) => pool[(start + index * stride) % pool.length]!,
+  );
+}
+
+function greatestCommonDivisor(left: number, right: number): number {
+  let a = left;
+  let b = right;
+  while (b !== 0) {
+    [a, b] = [b, a % b];
+  }
+  return Math.abs(a);
 }
 
 function allocationRange(

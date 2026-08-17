@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   id uuid PRIMARY KEY,
   username text NOT NULL,
   username_normalized text NOT NULL UNIQUE,
+  email text,
+  email_normalized text UNIQUE,
   password_hash text NOT NULL,
   display_name text NOT NULL,
   display_currency text NOT NULL DEFAULT 'USD'
@@ -631,6 +633,46 @@ const LLM_TRADERS_MIGRATION = [
     ON ai_trader_decisions (trader_id, decided_at DESC)`,
 ];
 
+const EMAIL_PASSWORD_RECOVERY_MIGRATION = [
+  `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email text`,
+  `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_normalized text`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS accounts_email_normalized_unique
+    ON accounts (email_normalized)`,
+  `CREATE TABLE IF NOT EXISTS password_reset_challenges (
+    id uuid PRIMARY KEY,
+    account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    code_hash text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    attempts_remaining integer NOT NULL DEFAULT 5
+      CHECK (attempts_remaining >= 0),
+    consumed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS password_reset_account_created_index
+    ON password_reset_challenges (account_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS password_reset_expiry_index
+    ON password_reset_challenges (expires_at)`,
+];
+
+const LEGACY_ACCOUNT_EMAIL_VERIFICATION_MIGRATION = [
+  `CREATE TABLE IF NOT EXISTS email_verification_challenges (
+    id uuid PRIMARY KEY,
+    account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    email text NOT NULL,
+    email_normalized text NOT NULL,
+    code_hash text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    attempts_remaining integer NOT NULL DEFAULT 5
+      CHECK (attempts_remaining >= 0),
+    consumed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS email_verification_account_created_index
+    ON email_verification_challenges (account_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS email_verification_expiry_index
+    ON email_verification_challenges (expires_at)`,
+];
+
 export async function migrateDatabase(client: PGlite): Promise<void> {
   await client.exec(INITIAL_SCHEMA);
   for (const statement of ACCOUNT_LEDGER_MIGRATION) {
@@ -654,6 +696,16 @@ export async function migrateDatabase(client: PGlite): Promise<void> {
   );
   await runVersionedMigration(client, 10, LIMIT_ORDERS_MIGRATION);
   await runVersionedMigration(client, 11, LLM_TRADERS_MIGRATION);
+  await runVersionedMigration(
+    client,
+    12,
+    EMAIL_PASSWORD_RECOVERY_MIGRATION,
+  );
+  await runVersionedMigration(
+    client,
+    13,
+    LEGACY_ACCOUNT_EMAIL_VERIFICATION_MIGRATION,
+  );
   await client.query(
     `INSERT INTO schema_migrations (version)
      VALUES (1)

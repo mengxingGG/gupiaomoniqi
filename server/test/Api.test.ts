@@ -25,6 +25,7 @@ describe("HTTP API", () => {
       url: "/api/auth/register",
       payload: {
         username: "limit_api_user",
+        email: "limit_api_user@example.com",
         displayName: "限价用户",
         password: "ValidPass123",
       },
@@ -116,6 +117,10 @@ describe("HTTP API", () => {
     });
     expect(healthResponse.statusCode).toBe(200);
     expect(healthResponse.json().data.loadControl).toBeDefined();
+    expect(healthResponse.json().data.runtimeMemory).toMatchObject({
+      heapUsedMb: expect.any(Number),
+      heapLimitMb: expect.any(Number),
+    });
   });
 
   it("行情支持行业目录、行业筛选且筛选发生在分页之前", async () => {
@@ -172,6 +177,7 @@ describe("HTTP API", () => {
       url: "/api/auth/register",
       payload: {
         username: "api_trader",
+        email: "api_trader@example.com",
         displayName: "接口交易员",
         password: "ValidPass123",
       },
@@ -265,6 +271,7 @@ describe("HTTP API", () => {
       url: "/api/auth/register",
       payload: {
         username: "idempotent_trader",
+        email: "idempotent_trader@example.com",
         displayName: "幂等交易员",
         password: "ValidPass123",
       },

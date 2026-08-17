@@ -1,6 +1,6 @@
 {
   "name": "gupiaomoniqi",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -17,7 +17,9 @@
     "db:inspect:real": "tsx server/src/real-market/db/inspect.ts",
     "local:prepare": "tsx server/src/startup/localPrepare.ts",
     "ai:benchmark": "tsx scripts/benchmark-ai.ts",
+    "runtime:benchmark": "tsx scripts/benchmark-runtime.ts",
     "gift-code:add": "tsx scripts/add-gift-code.ts",
+    "account:reset-password": "tsx scripts/reset-account-password.ts",
     "android:update:publish": "node scripts/publish-android-update.mjs",
     "deploy:windows:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/New-AppRelease.ps1",
     "deploy:windows:update": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/Update-App.ps1",
@@ -37,6 +39,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.18",
     "@types/node": "^26.1.1",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",

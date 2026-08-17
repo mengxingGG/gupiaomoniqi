@@ -1,5 +1,6 @@
 import os from "node:os";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { getHeapStatistics } from "node:v8";
 import type {
   AITradingStatus,
   RealMarketStatus,
@@ -214,13 +215,14 @@ export class SystemLoadController {
         100,
     );
     const memory = process.memoryUsage();
+    const heapLimitBytes = Math.max(1, getHeapStatistics().heap_size_limit);
     const eventLoopLagMs = this.#eventLoopDelay.mean / 1_000_000;
     this.#eventLoopDelay.reset();
     return {
       cpuPercent,
       rssRatio: memory.rss / this.#totalMemoryBytes,
       heapRatio:
-        memory.heapTotal > 0 ? memory.heapUsed / memory.heapTotal : 0,
+        memory.heapUsed / heapLimitBytes,
       eventLoopLagMs,
       aiBacklog: this.sources.aiStatus()?.dueBacklog ?? 0,
       realSweepPressure: computeRealSweepPressure(this.sources.realStatus()),
@@ -257,7 +259,6 @@ function classifyLoad(sample: SystemLoadSample): LoadLevel {
     sample.rssRatio >= 0.9 ||
     sample.heapRatio >= 0.9 ||
     sample.eventLoopLagMs >= 150 ||
-    sample.aiBacklog >= 800 ||
     sample.realSweepPressure >= 1.35
   ) {
     return "CRITICAL";
@@ -267,7 +268,6 @@ function classifyLoad(sample: SystemLoadSample): LoadLevel {
     sample.rssRatio >= 0.82 ||
     sample.heapRatio >= 0.82 ||
     sample.eventLoopLagMs >= 80 ||
-    sample.aiBacklog >= 300 ||
     sample.realSweepPressure >= 1
   ) {
     return "HIGH_PRESSURE";
@@ -277,7 +277,6 @@ function classifyLoad(sample: SystemLoadSample): LoadLevel {
     sample.rssRatio >= 0.72 ||
     sample.heapRatio >= 0.74 ||
     sample.eventLoopLagMs >= 35 ||
-    sample.aiBacklog >= 120 ||
     sample.realSweepPressure >= 0.7
   ) {
     return "BUSY";

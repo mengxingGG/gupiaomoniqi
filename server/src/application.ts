@@ -2,6 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getHeapStatistics } from "node:v8";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
@@ -15,6 +16,7 @@ import type {
   ChartSeries,
   DailyCheckInStatus,
   DisplayCurrency,
+  EmailVerificationRequestResult,
   IndustrySummary,
   Instrument,
   MarketItem,
@@ -26,6 +28,8 @@ import type {
   OrderBookSnapshot,
   PaginatedData,
   PortfolioSnapshot,
+  PasswordResetConfirmResult,
+  PasswordResetRequestResult,
   PublicAccount,
   Quote,
   RealMarketStatus,
@@ -96,6 +100,10 @@ import {
   type AccountFeatureStore,
 } from "./services/AccountFeatureStore.js";
 import { RewardService } from "./services/RewardService.js";
+import {
+  createPasswordResetMailerFromEnvironment,
+  type PasswordResetMailer,
+} from "./services/PasswordResetMailer.js";
 import { runStorageMaintenance } from "./runtime/StorageMaintenance.js";
 import type { PGlite } from "@electric-sql/pglite";
 import { SystemLoadController } from "./runtime/SystemLoadController.js";
@@ -144,6 +152,14 @@ const orderListSchema = z.object({
   status: z.enum(["OPEN", "FILLED", "CANCELLED"]).optional(),
 });
 
+const strongPasswordSchema = z
+  .string()
+  .min(8, "密码至少 8 位")
+  .max(128, "密码最多 128 位")
+  .regex(/[a-z]/, "密码必须包含小写字母")
+  .regex(/[A-Z]/, "密码必须包含大写字母")
+  .regex(/[0-9]/, "密码必须包含数字");
+
 const registerSchema = z.object({
   username: z
     .string()
@@ -151,13 +167,8 @@ const registerSchema = z.object({
     .min(3, "用户名至少 3 位")
     .max(20, "用户名最多 20 位")
     .regex(/^[A-Za-z0-9_]+$/, "用户名只能包含字母、数字和下划线"),
-  password: z
-    .string()
-    .min(8, "密码至少 8 位")
-    .max(128, "密码最多 128 位")
-    .regex(/[a-z]/, "密码必须包含小写字母")
-    .regex(/[A-Z]/, "密码必须包含大写字母")
-    .regex(/[0-9]/, "密码必须包含数字"),
+  email: z.string().trim().email("请输入有效邮箱").max(254),
+  password: strongPasswordSchema,
   displayName: z
     .string()
     .trim()
@@ -189,6 +200,25 @@ const listingSchema = z.object({
     .enum(["true", "false"])
     .transform((value) => value === "true")
     .optional(),
+});
+
+const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email("请输入有效邮箱").max(254),
+});
+
+const passwordResetConfirmSchema = z.object({
+  email: z.string().trim().email("请输入有效邮箱").max(254),
+  code: z.string().regex(/^\d{6}$/, "请输入 6 位数字验证码"),
+  newPassword: strongPasswordSchema,
+});
+
+const emailVerificationRequestSchema = z.object({
+  email: z.string().trim().email("请输入有效邮箱").max(254),
+});
+
+const emailVerificationConfirmSchema = z.object({
+  email: z.string().trim().email("请输入有效邮箱").max(254),
+  code: z.string().regex(/^\d{6}$/, "请输入 6 位数字验证码"),
 });
 
 const industryDirectorySchema = z.object({
@@ -268,6 +298,7 @@ export interface CreateApplicationOptions {
   appUpdateDirectory?: string;
   rootConfigPath?: string;
   llmFetchImplementation?: typeof fetch;
+  passwordResetMailer?: PasswordResetMailer | null;
 }
 
 export async function createApplication(
@@ -419,7 +450,15 @@ export async function createApplication(
     options.tickIntervalMs ?? GAME_RULES.tickIntervalMs,
     candleService,
   );
-  const authService = new AuthService(repository, clock);
+  const passwordResetMailer =
+    options.passwordResetMailer === undefined
+      ? createPasswordResetMailerFromEnvironment()
+      : options.passwordResetMailer;
+  const authService = new AuthService(
+    repository,
+    clock,
+    passwordResetMailer,
+  );
   const marketDetailService = new MarketDetailService(
     repository,
     engine,
@@ -642,6 +681,11 @@ export async function createApplication(
       chartSource: "DATABASE_RECORDED",
       realMarket: realRuntime.getStatus(),
       loadControl: loadController.getStatus(),
+      runtimeMemory: runtimeMemoryStatus(),
+      emailDelivery: {
+        configured: passwordResetMailer !== null,
+        mode: "SMTP_SEND_ONLY",
+      },
       serverTime: new Date().toISOString(),
     },
   }));
@@ -705,6 +749,72 @@ export async function createApplication(
     }
   });
 
+  app.post<{
+    Body: z.infer<typeof passwordResetRequestSchema>;
+    Reply: ApiEnvelope<PasswordResetRequestResult> | ApiError;
+  }>("/api/auth/password-reset/request", async (request, reply) => {
+    const parsed = passwordResetRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_PASSWORD_RESET_REQUEST",
+        message: parsed.error.issues[0]?.message ?? "邮箱格式无效",
+      });
+    }
+    const emailKey = parsed.data.email.toLowerCase();
+    if (
+      !authLimiter.allow("password-reset-global", 60, 60_000) ||
+      !authLimiter.allow(`password-reset-ip:${request.ip}`, 8, 15 * 60_000) ||
+      !authLimiter.allow(`password-reset-email:${emailKey}`, 3, 15 * 60_000)
+    ) {
+      return reply.status(429).send({
+        code: "RATE_LIMITED",
+        message: "验证码请求过于频繁，请稍后再试",
+      });
+    }
+
+    try {
+      return reply.status(202).send({
+        data: await authService.requestPasswordReset(parsed.data),
+      });
+    } catch (error) {
+      return sendAuthError(error, reply);
+    }
+  });
+
+  app.post<{
+    Body: z.infer<typeof passwordResetConfirmSchema>;
+    Reply: ApiEnvelope<PasswordResetConfirmResult> | ApiError;
+  }>("/api/auth/password-reset/confirm", async (request, reply) => {
+    if (
+      !authLimiter.allow(
+        `password-reset-confirm:${request.ip}`,
+        12,
+        15 * 60_000,
+      )
+    ) {
+      return reply.status(429).send({
+        code: "RATE_LIMITED",
+        message: "验证码尝试过于频繁，请稍后再试",
+      });
+    }
+    const parsed = passwordResetConfirmSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_PASSWORD_RESET_CONFIRMATION",
+        message:
+          parsed.error.issues[0]?.message ?? "密码找回信息格式无效",
+      });
+    }
+
+    try {
+      return {
+        data: await authService.confirmPasswordReset(parsed.data),
+      };
+    } catch (error) {
+      return sendAuthError(error, reply);
+    }
+  });
+
   app.get<{
     Reply: ApiEnvelope<PublicAccount> | ApiError;
   }>("/api/auth/me", async (request, reply) => {
@@ -717,6 +827,98 @@ export async function createApplication(
     return {
       data: toPublicAccount(account),
     };
+  });
+
+  app.post<{
+    Body: z.infer<typeof emailVerificationRequestSchema>;
+    Reply: ApiEnvelope<EmailVerificationRequestResult> | ApiError;
+  }>("/api/account/email-verification/request", async (request, reply) => {
+    const account = requireAccount(request, authService);
+    if (!account) {
+      return unauthorized(reply);
+    }
+    const parsed = emailVerificationRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_EMAIL_VERIFICATION_REQUEST",
+        message: parsed.error.issues[0]?.message ?? "邮箱格式无效",
+      });
+    }
+    const emailKey = parsed.data.email.toLowerCase();
+    if (
+      !authLimiter.allow("email-verification-global", 60, 60_000) ||
+      !authLimiter.allow(
+        `email-verification-account:${account.id}`,
+        3,
+        15 * 60_000,
+      ) ||
+      !authLimiter.allow(
+        `email-verification-email:${emailKey}`,
+        3,
+        15 * 60_000,
+      ) ||
+      !authLimiter.allow(
+        `email-verification-ip:${request.ip}`,
+        8,
+        15 * 60_000,
+      )
+    ) {
+      return reply.status(429).send({
+        code: "RATE_LIMITED",
+        message: "验证码请求过于频繁，请稍后再试",
+      });
+    }
+
+    try {
+      return reply.status(202).send({
+        data: await authService.requestEmailVerification(
+          account.id,
+          parsed.data,
+        ),
+      });
+    } catch (error) {
+      return sendAuthError(error, reply);
+    }
+  });
+
+  app.post<{
+    Body: z.infer<typeof emailVerificationConfirmSchema>;
+    Reply: ApiEnvelope<PublicAccount> | ApiError;
+  }>("/api/account/email-verification/confirm", async (request, reply) => {
+    const account = requireAccount(request, authService);
+    if (!account) {
+      return unauthorized(reply);
+    }
+    if (
+      !authLimiter.allow(
+        `email-verification-confirm:${account.id}:${request.ip}`,
+        10,
+        15 * 60_000,
+      )
+    ) {
+      return reply.status(429).send({
+        code: "RATE_LIMITED",
+        message: "验证码尝试过于频繁，请稍后再试",
+      });
+    }
+    const parsed = emailVerificationConfirmSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_EMAIL_VERIFICATION_CONFIRMATION",
+        message: parsed.error.issues[0]?.message ?? "验证码格式无效",
+      });
+    }
+
+    try {
+      return {
+        data: await authService.confirmEmailVerification(
+          account.id,
+          parsed.data,
+        ),
+      };
+    } catch (error) {
+      return sendAuthError(error, reply);
+    }
   });
 
   app.post<{
@@ -871,7 +1073,7 @@ export async function createApplication(
             request.params.instrumentId,
             parsed.data.range,
           )
-        : marketDetailService.getChart(
+        : await marketDetailService.getChart(
             request.params.instrumentId,
             parsed.data.range,
           );
@@ -2006,6 +2208,22 @@ function inspectRequestPath(requestUrl: string): {
   };
 }
 
+function runtimeMemoryStatus() {
+  const memory = process.memoryUsage();
+  const heapLimitBytes = getHeapStatistics().heap_size_limit;
+  return {
+    rssMb: roundMegabytes(memory.rss),
+    heapUsedMb: roundMegabytes(memory.heapUsed),
+    heapTotalMb: roundMegabytes(memory.heapTotal),
+    externalMb: roundMegabytes(memory.external),
+    heapLimitMb: roundMegabytes(heapLimitBytes),
+  };
+}
+
+function roundMegabytes(bytes: number): number {
+  return Math.round((bytes / (1024 * 1024)) * 10) / 10;
+}
+
 function isHtmlNavigationRequest(request: FastifyRequest): boolean {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return false;
@@ -2024,6 +2242,7 @@ function isHtmlNavigationRequest(request: FastifyRequest): boolean {
 
 class WindowRateLimiter {
   readonly #attempts = new Map<string, number[]>();
+  #lastCleanupAt = 0;
 
   allow(
     key: string,
@@ -2031,6 +2250,7 @@ class WindowRateLimiter {
     windowMs: number,
   ): boolean {
     const now = Date.now();
+    this.#cleanup(now);
     const cutoff = now - windowMs;
     const recent = (this.#attempts.get(key) ?? []).filter(
       (timestamp) => timestamp > cutoff,
@@ -2044,5 +2264,33 @@ class WindowRateLimiter {
     recent.push(now);
     this.#attempts.set(key, recent);
     return true;
+  }
+
+  #cleanup(now: number): void {
+    if (
+      now - this.#lastCleanupAt < 60_000 &&
+      this.#attempts.size < 10_000
+    ) {
+      return;
+    }
+    this.#lastCleanupAt = now;
+    const cutoff = now - 15 * 60_000;
+    for (const [key, attempts] of this.#attempts) {
+      const recent = attempts.filter((timestamp) => timestamp > cutoff);
+      if (recent.length === 0) {
+        this.#attempts.delete(key);
+      } else if (recent.length !== attempts.length) {
+        this.#attempts.set(key, recent);
+      }
+    }
+    while (this.#attempts.size > 20_000) {
+      const oldestKey = this.#attempts.keys().next().value as
+        | string
+        | undefined;
+      if (!oldestKey) {
+        break;
+      }
+      this.#attempts.delete(oldestKey);
+    }
   }
 }

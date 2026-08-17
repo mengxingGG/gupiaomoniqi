@@ -3,6 +3,7 @@ package com.mengxinggg.gupiaomoniqi.model
 data class PublicAccount(
     val id: String,
     val username: String,
+    val email: String?,
     val displayName: String,
     val displayCurrency: Currency,
     val createdAt: String,
@@ -11,6 +12,20 @@ data class PublicAccount(
 data class AuthResult(
     val token: String,
     val account: PublicAccount,
+)
+
+data class PasswordResetRequestResult(
+    val accepted: Boolean,
+    val expiresInSeconds: Int,
+)
+
+data class PasswordResetConfirmResult(
+    val reset: Boolean,
+)
+
+data class EmailVerificationRequestResult(
+    val accepted: Boolean,
+    val expiresInSeconds: Int,
 )
 
 data class Position(

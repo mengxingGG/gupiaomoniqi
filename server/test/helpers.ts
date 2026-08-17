@@ -102,6 +102,7 @@ export async function createTestHarness(
       ? null
       : await authService.register({
           username: "test_trader",
+          email: "test_trader@example.com",
           displayName: "测试交易员",
           password: "ValidPass123",
         });

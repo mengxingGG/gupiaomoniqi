@@ -76,6 +76,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 
 ## 安装或更新开机任务
 
+应用进程显式保留 4096 MB V8 堆安全围栏。K 线有界缓存、SMTP 机器级环境变量和服务器本机紧急改密说明见 [`docs/运行性能与账户恢复.md`](../../docs/运行性能与账户恢复.md)。
+
 首次部署可按以下顺序执行；隧道并不依赖应用已经健康，也可以先安装：
 
 ```powershell

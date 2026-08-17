@@ -69,10 +69,12 @@ enum class UiOrderStatus(val label: String) {
 enum class AuthMode {
     REGISTER,
     LOGIN,
+    RESET,
 }
 
 data class AccountUi(
     val username: String,
+    val email: String?,
     val displayName: String,
 )
 
@@ -250,6 +252,12 @@ data class AppUiState(
     val authMode: AuthMode = AuthMode.REGISTER,
     val authBusy: Boolean = false,
     val authError: String? = null,
+    val authNotice: String? = null,
+    val authResetCodeSent: Boolean = false,
+    val emailCompletionBusy: Boolean = false,
+    val emailCompletionCodeSent: Boolean = false,
+    val emailCompletionError: String? = null,
+    val emailCompletionNotice: String? = null,
     val tradeSheet: TradeSheetUi? = null,
     val tradeBusy: Boolean = false,
     val tradeError: String? = null,

@@ -11,6 +11,17 @@ internal object TestJson {
         }
     """.trimIndent()
 
+    fun accountWithEmail(email: String) = """
+        {
+          "id": "account-1",
+          "username": "trader_1",
+          "email": "$email",
+          "displayName": "Trader One",
+          "displayCurrency": "CNY",
+          "createdAt": "2026-07-30T01:00:00.000Z"
+        }
+    """.trimIndent()
+
     val instrument = """
         {
           "id": "us-aapl",

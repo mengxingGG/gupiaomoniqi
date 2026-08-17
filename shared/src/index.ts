@@ -220,6 +220,7 @@ export interface OrderCancellationResult {
 export interface PublicAccount {
   id: string;
   username: string;
+  email: string | null;
   displayName: string;
   displayCurrency: DisplayCurrency;
   createdAt: string;
@@ -249,6 +250,20 @@ export interface PaginatedData<T> {
 export interface MarketItem {
   instrument: Instrument;
   quote: Quote;
+}
+
+export interface PasswordResetRequestResult {
+  accepted: true;
+  expiresInSeconds: number;
+}
+
+export interface PasswordResetConfirmResult {
+  reset: true;
+}
+
+export interface EmailVerificationRequestResult {
+  accepted: true;
+  expiresInSeconds: number;
 }
 
 export interface IndustrySummary {

@@ -20,6 +20,7 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mengxinggg.gupiaomoniqi.data.DefaultStockRepository
 import com.mengxinggg.gupiaomoniqi.ui.components.AppTopControls
+import com.mengxinggg.gupiaomoniqi.ui.components.EmailCompletionDialog
 import com.mengxinggg.gupiaomoniqi.ui.components.MainBottomBar
 import com.mengxinggg.gupiaomoniqi.ui.components.ServerSettingsSheet
 import com.mengxinggg.gupiaomoniqi.ui.components.TradeSheet
@@ -175,6 +176,8 @@ fun StockSimulatorApp() {
                         onBack = viewModel::closeAuth,
                         onModeChange = viewModel::changeAuthMode,
                         onSubmit = viewModel::authenticate,
+                        onResetRequest = viewModel::requestPasswordReset,
+                        onResetConfirm = viewModel::confirmPasswordReset,
                         modifier = Modifier
                             .padding(innerPadding)
                             .statusBarsPadding(),
@@ -270,6 +273,20 @@ fun StockSimulatorApp() {
                         updateManager.checkAndInstall()
                     }
                 },
+            )
+        }
+
+        if (
+            state.account != null &&
+            state.account?.email.isNullOrBlank() &&
+            !state.sessionRestoring
+        ) {
+            EmailCompletionDialog(
+                state = state,
+                onRequestCode = viewModel::requestEmailCompletion,
+                onConfirm = viewModel::confirmEmailCompletion,
+                onChangeEmail = viewModel::changeEmailCompletionAddress,
+                onLogout = viewModel::logout,
             )
         }
     }

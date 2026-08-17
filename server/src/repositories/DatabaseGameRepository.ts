@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import {
   and,
   eq,
+  isNull,
   sql,
 } from "drizzle-orm";
 import type { DatabaseConnection } from "../db/client.js";
@@ -25,7 +26,9 @@ import {
   aiTraderDecisions,
   aiTraders,
   candles as candleTable,
+  emailVerificationChallenges,
   orders as orderTable,
+  passwordResetChallenges,
   positionSettlementLots,
   portfolios,
   positions,
@@ -40,10 +43,12 @@ import type {
   CandleRecord,
   CreateAITraderCommit,
   CreateAccountCommit,
+  EmailVerificationChallengeRecord,
   GameRepository,
   InstrumentRecord,
   OrderRecord,
   OrderStateCommit,
+  PasswordResetChallengeRecord,
   PortfolioRecord,
   PositionRecord,
   SessionRecord,
@@ -77,13 +82,24 @@ interface InstrumentQuoteRow {
   quote_updated_at: Date | string;
 }
 
+const CANDLE_HOT_CACHE_LIMIT = 2;
+
 export class DatabaseGameRepository implements GameRepository {
   readonly #instruments = new Map<string, InstrumentRecord>();
   readonly #quotes = new Map<string, Quote>();
   readonly #candles = new Map<string, Map<string, CandleRecord>>();
   readonly #accounts = new Map<string, AccountRecord>();
   readonly #accountIdsByUsername = new Map<string, string>();
+  readonly #accountIdsByEmail = new Map<string, string>();
   readonly #sessions = new Map<string, SessionRecord>();
+  readonly #passwordResetChallenges = new Map<
+    string,
+    PasswordResetChallengeRecord
+  >();
+  readonly #emailVerificationChallenges = new Map<
+    string,
+    EmailVerificationChallengeRecord
+  >();
   readonly #portfolios = new Map<string, PortfolioRecord>();
   readonly #portfolioIdsByAccount = new Map<string, string>();
   readonly #positions = new Map<string, Map<string, PositionRecord>>();
@@ -179,6 +195,43 @@ export class DatabaseGameRepository implements GameRepository {
       .map((candle) => structuredClone(candle));
   }
 
+  async loadCandles(
+    instrumentId: string,
+    interval: CandleInterval,
+    limit: number,
+  ): Promise<CandleRecord[]> {
+    const safeLimit = Math.max(1, Math.min(5_000, Math.trunc(limit)));
+    const result = await this.connection.client.query<{
+      instrument_id: string;
+      interval: CandleInterval;
+      bucket_start: Date | string;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+      source: CandleSource;
+      is_partial: boolean;
+      updated_at: Date | string;
+    }>(
+      `SELECT instrument_id, interval, bucket_start,
+              open::float8, high::float8, low::float8, close::float8,
+              volume::float8, source, is_partial, updated_at
+         FROM (
+           SELECT instrument_id, interval, bucket_start, open, high, low,
+                  close, volume, source, is_partial, updated_at
+             FROM candles
+            WHERE instrument_id = $1 AND interval = $2
+            ORDER BY bucket_start DESC
+            LIMIT $3
+         ) recent
+        ORDER BY bucket_start`,
+      [instrumentId, interval, safeLimit],
+    );
+
+    return result.rows.map(toCandleRecord);
+  }
+
   getLatestCandle(
     instrumentId: string,
     interval: CandleInterval,
@@ -237,6 +290,7 @@ export class DatabaseGameRepository implements GameRepository {
       const series =
         this.#candles.get(key) ?? new Map<string, CandleRecord>();
       series.set(candle.time, structuredClone(candle));
+      trimOldestCandles(series, CANDLE_HOT_CACHE_LIMIT);
       this.#candles.set(key, series);
     }
   }
@@ -247,6 +301,12 @@ export class DatabaseGameRepository implements GameRepository {
     ) {
       throw new Error("ACCOUNT_EXISTS");
     }
+    if (
+      commit.account.emailNormalized &&
+      this.#accountIdsByEmail.has(commit.account.emailNormalized)
+    ) {
+      throw new Error("EMAIL_EXISTS");
+    }
 
     try {
       await this.connection.db.transaction(async (transaction) => {
@@ -254,6 +314,8 @@ export class DatabaseGameRepository implements GameRepository {
           id: commit.account.id,
           username: commit.account.username,
           usernameNormalized: commit.account.usernameNormalized,
+          email: commit.account.email,
+          emailNormalized: commit.account.emailNormalized,
           passwordHash: commit.account.passwordHash,
           displayName: commit.account.displayName,
           displayCurrency: commit.account.displayCurrency,
@@ -275,6 +337,9 @@ export class DatabaseGameRepository implements GameRepository {
         });
       });
     } catch (error) {
+      if (String(error).includes("email_normalized")) {
+        throw new Error("EMAIL_EXISTS");
+      }
       if (String(error).includes("username_normalized")) {
         throw new Error("ACCOUNT_EXISTS");
       }
@@ -286,6 +351,12 @@ export class DatabaseGameRepository implements GameRepository {
       commit.account.usernameNormalized,
       commit.account.id,
     );
+    if (commit.account.emailNormalized) {
+      this.#accountIdsByEmail.set(
+        commit.account.emailNormalized,
+        commit.account.id,
+      );
+    }
     this.#portfolios.set(
       commit.portfolio.id,
       structuredClone(commit.portfolio),
@@ -310,6 +381,11 @@ export class DatabaseGameRepository implements GameRepository {
     return accountId ? this.getAccountById(accountId) : undefined;
   }
 
+  getAccountByEmail(emailNormalized: string): AccountRecord | undefined {
+    const accountId = this.#accountIdsByEmail.get(emailNormalized);
+    return accountId ? this.getAccountById(accountId) : undefined;
+  }
+
   async updateLastLogin(accountId: string, at: string): Promise<void> {
     await this.connection.db
       .update(accounts)
@@ -317,6 +393,105 @@ export class DatabaseGameRepository implements GameRepository {
       .where(eq(accounts.id, accountId));
     const account = this.#requireAccount(accountId);
     account.lastLoginAt = at;
+  }
+
+  async resetPassword(
+    accountId: string,
+    passwordHash: string,
+    challengeId?: string,
+  ): Promise<void> {
+    await this.connection.db.transaction(async (transaction) => {
+      if (challengeId) {
+        const consumed = await transaction
+          .update(passwordResetChallenges)
+          .set({ consumedAt: new Date() })
+          .where(
+            and(
+              eq(passwordResetChallenges.id, challengeId),
+              isNull(passwordResetChallenges.consumedAt),
+            ),
+          )
+          .returning({ id: passwordResetChallenges.id });
+        if (consumed.length === 0) {
+          throw new Error("PASSWORD_RESET_CHALLENGE_CONSUMED");
+        }
+      }
+      await transaction
+        .update(accounts)
+        .set({ passwordHash })
+        .where(eq(accounts.id, accountId));
+      await transaction
+        .delete(sessions)
+        .where(eq(sessions.accountId, accountId));
+    });
+
+    this.#requireAccount(accountId).passwordHash = passwordHash;
+    for (const [tokenHash, session] of this.#sessions) {
+      if (session.accountId === accountId) {
+        this.#sessions.delete(tokenHash);
+      }
+    }
+    if (challengeId) {
+      const challenge = this.#passwordResetChallenges.get(accountId);
+      if (challenge?.id === challengeId) {
+        challenge.consumedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  async bindAccountEmail(
+    accountId: string,
+    email: string,
+    emailNormalized: string,
+    challengeId: string,
+  ): Promise<void> {
+    try {
+      await this.connection.db.transaction(async (transaction) => {
+        const consumed = await transaction
+          .update(emailVerificationChallenges)
+          .set({ consumedAt: new Date() })
+          .where(
+            and(
+              eq(emailVerificationChallenges.id, challengeId),
+              eq(emailVerificationChallenges.accountId, accountId),
+              eq(
+                emailVerificationChallenges.emailNormalized,
+                emailNormalized,
+              ),
+              isNull(emailVerificationChallenges.consumedAt),
+            ),
+          )
+          .returning({ id: emailVerificationChallenges.id });
+        if (consumed.length === 0) {
+          throw new Error("EMAIL_VERIFICATION_CHALLENGE_CONSUMED");
+        }
+
+        const updated = await transaction
+          .update(accounts)
+          .set({ email, emailNormalized })
+          .where(
+            and(eq(accounts.id, accountId), isNull(accounts.emailNormalized)),
+          )
+          .returning({ id: accounts.id });
+        if (updated.length === 0) {
+          throw new Error("ACCOUNT_EMAIL_ALREADY_SET");
+        }
+      });
+    } catch (error) {
+      if (String(error).includes("email_normalized")) {
+        throw new Error("EMAIL_EXISTS");
+      }
+      throw error;
+    }
+
+    const account = this.#requireAccount(accountId);
+    account.email = email;
+    account.emailNormalized = emailNormalized;
+    this.#accountIdsByEmail.set(emailNormalized, accountId);
+    const challenge = this.#emailVerificationChallenges.get(accountId);
+    if (challenge?.id === challengeId) {
+      challenge.consumedAt = new Date().toISOString();
+    }
   }
 
   async updateDisplayCurrency(
@@ -377,6 +552,180 @@ export class DatabaseGameRepository implements GameRepository {
       .delete(sessions)
       .where(eq(sessions.tokenHash, tokenHash));
     this.#sessions.delete(tokenHash);
+  }
+
+  async replacePasswordResetChallenge(
+    challenge: PasswordResetChallengeRecord,
+  ): Promise<void> {
+    await this.connection.db.transaction(async (transaction) => {
+      await transaction
+        .update(passwordResetChallenges)
+        .set({ consumedAt: new Date(challenge.createdAt) })
+        .where(
+          and(
+            eq(passwordResetChallenges.accountId, challenge.accountId),
+            isNull(passwordResetChallenges.consumedAt),
+          ),
+        );
+      await transaction.insert(passwordResetChallenges).values({
+        id: challenge.id,
+        accountId: challenge.accountId,
+        codeHash: challenge.codeHash,
+        expiresAt: new Date(challenge.expiresAt),
+        attemptsRemaining: challenge.attemptsRemaining,
+        consumedAt: challenge.consumedAt
+          ? new Date(challenge.consumedAt)
+          : null,
+        createdAt: new Date(challenge.createdAt),
+      });
+    });
+    this.#passwordResetChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  getPasswordResetChallenge(
+    accountId: string,
+  ): PasswordResetChallengeRecord | undefined {
+    const challenge = this.#passwordResetChallenges.get(accountId);
+    return challenge ? structuredClone(challenge) : undefined;
+  }
+
+  async updatePasswordResetChallenge(
+    challenge: PasswordResetChallengeRecord,
+  ): Promise<void> {
+    await this.connection.db
+      .update(passwordResetChallenges)
+      .set({
+        attemptsRemaining: challenge.attemptsRemaining,
+        consumedAt: challenge.consumedAt
+          ? new Date(challenge.consumedAt)
+          : null,
+      })
+      .where(eq(passwordResetChallenges.id, challenge.id));
+    this.#passwordResetChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  async recordPasswordResetFailure(
+    accountId: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number> {
+    const result = await this.connection.client.query<{
+      attempts_remaining: number;
+      consumed_at: Date | string | null;
+    }>(
+      `UPDATE password_reset_challenges
+          SET attempts_remaining = GREATEST(0, attempts_remaining - 1),
+              consumed_at = CASE
+                WHEN attempts_remaining <= 1 THEN $3
+                ELSE consumed_at
+              END
+        WHERE id = $1 AND account_id = $2 AND consumed_at IS NULL
+      RETURNING attempts_remaining, consumed_at`,
+      [challengeId, accountId, at],
+    );
+    const row = result.rows[0];
+    const challenge = this.#passwordResetChallenges.get(accountId);
+    if (row && challenge?.id === challengeId) {
+      challenge.attemptsRemaining = row.attempts_remaining;
+      challenge.consumedAt = row.consumed_at
+        ? new Date(row.consumed_at).toISOString()
+        : null;
+    }
+    return row?.attempts_remaining ?? 0;
+  }
+
+  async replaceEmailVerificationChallenge(
+    challenge: EmailVerificationChallengeRecord,
+  ): Promise<void> {
+    await this.connection.db.transaction(async (transaction) => {
+      await transaction
+        .update(emailVerificationChallenges)
+        .set({ consumedAt: new Date(challenge.createdAt) })
+        .where(
+          and(
+            eq(emailVerificationChallenges.accountId, challenge.accountId),
+            isNull(emailVerificationChallenges.consumedAt),
+          ),
+        );
+      await transaction.insert(emailVerificationChallenges).values({
+        id: challenge.id,
+        accountId: challenge.accountId,
+        email: challenge.email,
+        emailNormalized: challenge.emailNormalized,
+        codeHash: challenge.codeHash,
+        expiresAt: new Date(challenge.expiresAt),
+        attemptsRemaining: challenge.attemptsRemaining,
+        consumedAt: challenge.consumedAt
+          ? new Date(challenge.consumedAt)
+          : null,
+        createdAt: new Date(challenge.createdAt),
+      });
+    });
+    this.#emailVerificationChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  getEmailVerificationChallenge(
+    accountId: string,
+  ): EmailVerificationChallengeRecord | undefined {
+    const challenge = this.#emailVerificationChallenges.get(accountId);
+    return challenge ? structuredClone(challenge) : undefined;
+  }
+
+  async updateEmailVerificationChallenge(
+    challenge: EmailVerificationChallengeRecord,
+  ): Promise<void> {
+    await this.connection.db
+      .update(emailVerificationChallenges)
+      .set({
+        attemptsRemaining: challenge.attemptsRemaining,
+        consumedAt: challenge.consumedAt
+          ? new Date(challenge.consumedAt)
+          : null,
+      })
+      .where(eq(emailVerificationChallenges.id, challenge.id));
+    this.#emailVerificationChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  async recordEmailVerificationFailure(
+    accountId: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number> {
+    const result = await this.connection.client.query<{
+      attempts_remaining: number;
+      consumed_at: Date | string | null;
+    }>(
+      `UPDATE email_verification_challenges
+          SET attempts_remaining = GREATEST(0, attempts_remaining - 1),
+              consumed_at = CASE
+                WHEN attempts_remaining <= 1 THEN $3
+                ELSE consumed_at
+              END
+        WHERE id = $1 AND account_id = $2 AND consumed_at IS NULL
+      RETURNING attempts_remaining, consumed_at`,
+      [challengeId, accountId, at],
+    );
+    const row = result.rows[0];
+    const challenge = this.#emailVerificationChallenges.get(accountId);
+    if (row && challenge?.id === challengeId) {
+      challenge.attemptsRemaining = row.attempts_remaining;
+      challenge.consumedAt = row.consumed_at
+        ? new Date(row.consumed_at).toISOString()
+        : null;
+    }
+    return row?.attempts_remaining ?? 0;
   }
 
   getPortfolioByAccountId(
@@ -1079,26 +1428,18 @@ export class DatabaseGameRepository implements GameRepository {
       `SELECT instrument_id, interval, bucket_start,
               open::float8, high::float8, low::float8, close::float8,
               volume::float8, source, is_partial, updated_at
-         FROM candles
-        WHERE interval = 'DAY'
-           OR bucket_start >= now() - interval '7 days'
-        ORDER BY instrument_id, interval, bucket_start`,
+         FROM candles stored_candle
+        WHERE bucket_start = (
+          SELECT max(candidate.bucket_start)
+            FROM candles candidate
+           WHERE candidate.instrument_id = stored_candle.instrument_id
+             AND candidate.interval = stored_candle.interval
+        )
+        ORDER BY instrument_id, interval`,
     );
 
     for (const row of candleResult.rows) {
-      const candle: CandleRecord = {
-        instrumentId: row.instrument_id,
-        interval: row.interval,
-        time: new Date(row.bucket_start).toISOString(),
-        open: row.open,
-        high: row.high,
-        low: row.low,
-        close: row.close,
-        volume: row.volume,
-        source: row.source,
-        isPartial: row.is_partial,
-        updatedAt: new Date(row.updated_at).toISOString(),
-      };
+      const candle = toCandleRecord(row);
       const key = candleSeriesKey(candle.instrumentId, candle.interval);
       const series =
         this.#candles.get(key) ?? new Map<string, CandleRecord>();
@@ -1110,14 +1451,17 @@ export class DatabaseGameRepository implements GameRepository {
       id: string;
       username: string;
       username_normalized: string;
+      email: string | null;
+      email_normalized: string | null;
       password_hash: string;
       display_name: string;
       display_currency: DisplayCurrency;
       created_at: Date | string;
       last_login_at: Date | string | null;
     }>(
-      `SELECT id, username, username_normalized, password_hash, display_name,
-              display_currency, created_at, last_login_at
+      `SELECT id, username, username_normalized, email, email_normalized,
+              password_hash, display_name, display_currency, created_at,
+              last_login_at
          FROM accounts`,
     );
 
@@ -1126,6 +1470,8 @@ export class DatabaseGameRepository implements GameRepository {
         id: row.id,
         username: row.username,
         usernameNormalized: row.username_normalized,
+        email: row.email,
+        emailNormalized: row.email_normalized,
         passwordHash: row.password_hash,
         displayName: row.display_name,
         displayCurrency: row.display_currency,
@@ -1139,6 +1485,9 @@ export class DatabaseGameRepository implements GameRepository {
         account.usernameNormalized,
         account.id,
       );
+      if (account.emailNormalized) {
+        this.#accountIdsByEmail.set(account.emailNormalized, account.id);
+      }
     }
 
     const sessionResult = await this.connection.client.query<{
@@ -1261,8 +1610,16 @@ export class DatabaseGameRepository implements GameRepository {
     }>(
       `SELECT id, trader_id, decided_at, action, instrument_id,
               result, reason, model_id, detail
-         FROM ai_trader_decisions
-        WHERE decided_at >= now() - interval '30 days'
+         FROM (
+           SELECT id, trader_id, decided_at, action, instrument_id,
+                  result, reason, model_id, detail,
+                  row_number() OVER (
+                    PARTITION BY trader_id ORDER BY decided_at DESC
+                  ) AS decision_rank
+             FROM ai_trader_decisions
+            WHERE decided_at >= now() - interval '30 days'
+         ) recent_decisions
+        WHERE decision_rank <= 100
         ORDER BY decided_at DESC`,
     );
     for (const row of decisionResult.rows) {
@@ -1333,28 +1690,39 @@ export class DatabaseGameRepository implements GameRepository {
       idempotency_key: string | null;
       created_at: Date | string;
     }>(
-      `SELECT t.id, t.portfolio_id, t.instrument_id, i.symbol, i.name,
-              i.market, t.side, t.quantity,
-              COALESCE(t.quote_price, t.price)::float8 AS quote_price,
-              COALESCE(t.quote_currency, t.currency) AS quote_currency,
-              COALESCE(t.fx_rate_to_usd, 1)::float8 AS fx_rate_to_usd,
-              COALESCE(t.price_usd, t.price)::float8 AS price_usd,
-              COALESCE(t.gross_amount_usd, t.gross_amount)::float8
-                AS gross_amount_usd,
-              COALESCE(t.fee_usd, t.fee)::float8 AS fee_usd,
-              COALESCE(t.net_amount_usd, t.net_amount)::float8
-                AS net_amount_usd,
-              COALESCE(t.realized_profit_usd, t.realized_profit)::float8
-                AS realized_profit_usd,
-              t.actor_type, t.actor_id,
-              t.idempotency_key,
-              t.created_at
-         FROM transactions t
-         JOIN instruments i ON i.id = t.instrument_id
-         JOIN portfolios pf ON pf.id = t.portfolio_id
-         LEFT JOIN ai_traders ait ON ait.portfolio_id = pf.id
-        WHERE pf.account_id IS NOT NULL OR ait.trader_kind = 'LLM'
-        ORDER BY t.created_at DESC`,
+      `SELECT id, portfolio_id, instrument_id, symbol, name, market, side,
+              quantity, quote_price, quote_currency, fx_rate_to_usd,
+              price_usd, gross_amount_usd, fee_usd, net_amount_usd,
+              realized_profit_usd, actor_type, actor_id, idempotency_key,
+              created_at
+         FROM (
+           SELECT t.id, t.portfolio_id, t.instrument_id, i.symbol, i.name,
+                  i.market, t.side, t.quantity,
+                  COALESCE(t.quote_price, t.price)::float8 AS quote_price,
+                  COALESCE(t.quote_currency, t.currency) AS quote_currency,
+                  COALESCE(t.fx_rate_to_usd, 1)::float8 AS fx_rate_to_usd,
+                  COALESCE(t.price_usd, t.price)::float8 AS price_usd,
+                  COALESCE(t.gross_amount_usd, t.gross_amount)::float8
+                    AS gross_amount_usd,
+                  COALESCE(t.fee_usd, t.fee)::float8 AS fee_usd,
+                  COALESCE(t.net_amount_usd, t.net_amount)::float8
+                    AS net_amount_usd,
+                  COALESCE(t.realized_profit_usd, t.realized_profit)::float8
+                    AS realized_profit_usd,
+                  t.actor_type, t.actor_id, t.idempotency_key, t.created_at,
+                  pf.account_id, ait.trader_kind,
+                  row_number() OVER (
+                    PARTITION BY t.portfolio_id ORDER BY t.created_at DESC
+                  ) AS transaction_rank
+             FROM transactions t
+             JOIN instruments i ON i.id = t.instrument_id
+             JOIN portfolios pf ON pf.id = t.portfolio_id
+             LEFT JOIN ai_traders ait ON ait.portfolio_id = pf.id
+            WHERE pf.account_id IS NOT NULL OR ait.trader_kind = 'LLM'
+         ) visible_transactions
+        WHERE account_id IS NOT NULL
+           OR (trader_kind = 'LLM' AND transaction_rank <= 500)
+        ORDER BY created_at DESC`,
     );
 
     for (const row of transactionResult.rows) {
@@ -1377,6 +1745,74 @@ export class DatabaseGameRepository implements GameRepository {
         actorType: row.actor_type,
         actorId: row.actor_id ?? undefined,
         idempotencyKey: row.idempotency_key ?? undefined,
+        createdAt: new Date(row.created_at).toISOString(),
+      });
+    }
+
+    const challengeResult = await this.connection.client.query<{
+      id: string;
+      account_id: string;
+      code_hash: string;
+      expires_at: Date | string;
+      attempts_remaining: number;
+      consumed_at: Date | string | null;
+      created_at: Date | string;
+    }>(
+      `SELECT id, account_id, code_hash, expires_at, attempts_remaining,
+              consumed_at, created_at
+         FROM password_reset_challenges
+        WHERE consumed_at IS NULL AND expires_at > now()
+        ORDER BY created_at DESC`,
+    );
+    for (const row of challengeResult.rows) {
+      if (this.#passwordResetChallenges.has(row.account_id)) {
+        continue;
+      }
+      this.#passwordResetChallenges.set(row.account_id, {
+        id: row.id,
+        accountId: row.account_id,
+        codeHash: row.code_hash,
+        expiresAt: new Date(row.expires_at).toISOString(),
+        attemptsRemaining: row.attempts_remaining,
+        consumedAt: row.consumed_at
+          ? new Date(row.consumed_at).toISOString()
+          : null,
+        createdAt: new Date(row.created_at).toISOString(),
+      });
+    }
+
+    const emailChallengeResult = await this.connection.client.query<{
+      id: string;
+      account_id: string;
+      email: string;
+      email_normalized: string;
+      code_hash: string;
+      expires_at: Date | string;
+      attempts_remaining: number;
+      consumed_at: Date | string | null;
+      created_at: Date | string;
+    }>(
+      `SELECT id, account_id, email, email_normalized, code_hash,
+              expires_at, attempts_remaining, consumed_at, created_at
+         FROM email_verification_challenges
+        WHERE consumed_at IS NULL AND expires_at > now()
+        ORDER BY created_at DESC`,
+    );
+    for (const row of emailChallengeResult.rows) {
+      if (this.#emailVerificationChallenges.has(row.account_id)) {
+        continue;
+      }
+      this.#emailVerificationChallenges.set(row.account_id, {
+        id: row.id,
+        accountId: row.account_id,
+        email: row.email,
+        emailNormalized: row.email_normalized,
+        codeHash: row.code_hash,
+        expiresAt: new Date(row.expires_at).toISOString(),
+        attemptsRemaining: row.attempts_remaining,
+        consumedAt: row.consumed_at
+          ? new Date(row.consumed_at).toISOString()
+          : null,
         createdAt: new Date(row.created_at).toISOString(),
       });
     }
@@ -1416,6 +1852,10 @@ export class DatabaseGameRepository implements GameRepository {
               o.cancelled_at, o.transaction_id
          FROM orders o
          JOIN instruments i ON i.id = o.instrument_id
+         JOIN portfolios pf ON pf.id = o.portfolio_id
+        WHERE pf.account_id IS NOT NULL
+           OR o.status = 'OPEN'
+           OR o.created_at >= now() - interval '30 days'
         ORDER BY o.created_at DESC`,
     );
 
@@ -1576,4 +2016,47 @@ function cloneLatestCandle(
     }
   }
   return latest ? structuredClone(latest) : undefined;
+}
+
+function toCandleRecord(row: {
+  instrument_id: string;
+  interval: CandleInterval;
+  bucket_start: Date | string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  source: CandleSource;
+  is_partial: boolean;
+  updated_at: Date | string;
+}): CandleRecord {
+  return {
+    instrumentId: row.instrument_id,
+    interval: row.interval,
+    time: new Date(row.bucket_start).toISOString(),
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close,
+    volume: row.volume,
+    source: row.source,
+    isPartial: row.is_partial,
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+function trimOldestCandles(
+  series: Map<string, CandleRecord>,
+  limit: number,
+): void {
+  if (series.size <= limit) {
+    return;
+  }
+  const oldest = [...series.keys()]
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, series.size - limit);
+  for (const time of oldest) {
+    series.delete(time);
+  }
 }

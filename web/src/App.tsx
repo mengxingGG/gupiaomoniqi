@@ -18,6 +18,7 @@ import {
   updateDisplayCurrency,
 } from "./api";
 import { AccountPage } from "./pages/AccountPage";
+import { EmailCompletionCard } from "./components/EmailCompletionCard";
 import { AuthPage } from "./pages/AuthPage";
 import { HomePage } from "./pages/HomePage";
 import { OrdersPage, type OrdersTab } from "./pages/OrdersPage";
@@ -41,6 +42,7 @@ export function App() {
   const [account, setAccount] = useState<PublicAccount | null>(
     storedAuth?.account ?? null,
   );
+  const [accountVerified, setAccountVerified] = useState(!storedAuth);
   const [displayCurrency, setDisplayCurrency] =
     useState<DisplayCurrency>(() => {
       if (storedAuth?.account.displayCurrency) {
@@ -77,7 +79,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const handleExpired = () => setAccount(null);
+    const handleExpired = () => {
+      setAccount(null);
+      setAccountVerified(true);
+    };
     window.addEventListener("simulator:auth-expired", handleExpired);
     return () =>
       window.removeEventListener("simulator:auth-expired", handleExpired);
@@ -96,6 +101,7 @@ export function App() {
         }
 
         setAccount(currentAccount);
+        setAccountVerified(true);
         setDisplayCurrency(currentAccount.displayCurrency);
         storeAuth({
           token: readStoredAuth()?.token ?? storedAuth.token,
@@ -105,6 +111,7 @@ export function App() {
       .catch(() => {
         if (active) {
           setAccount(null);
+          setAccountVerified(true);
         }
       });
 
@@ -121,6 +128,7 @@ export function App() {
   function handleAuthenticated(result: AuthResult) {
     storeAuth(result);
     setAccount(result.account);
+    setAccountVerified(true);
     setDisplayCurrency(result.account.displayCurrency);
     window.localStorage.setItem(
       DISPLAY_CURRENCY_KEY,
@@ -167,7 +175,16 @@ export function App() {
   async function handleLogout() {
     await logout();
     setAccount(null);
+    setAccountVerified(true);
     navigate(modeRoot(mode));
+  }
+
+  function handleEmailCompleted(nextAccount: PublicAccount) {
+    const auth = readStoredAuth();
+    setAccount(nextAccount);
+    if (auth) {
+      storeAuth({ ...auth, account: nextAccount });
+    }
   }
 
   return (
@@ -369,6 +386,14 @@ export function App() {
         <AuthPage
           onAuthenticated={handleAuthenticated}
           onBack={() => navigate(modeRoot(mode))}
+        />
+      ) : null}
+
+      {account && accountVerified && !account.email ? (
+        <EmailCompletionCard
+          account={account}
+          onCompleted={handleEmailCompleted}
+          onLogout={handleLogout}
         />
       ) : null}
     </div>

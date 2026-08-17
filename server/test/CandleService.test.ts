@@ -95,12 +95,12 @@ describe("CandleService", () => {
     fastRepository.listCandles = repository.listCandles.bind(repository);
 
     expect(
-      service.getChart("us-aapl", "INTRADAY")?.candles.at(-1),
+      (await service.getChart("us-aapl", "INTRADAY"))?.candles.at(-1),
     ).toMatchObject({
       time: "2026-07-27T12:00:00.000Z",
       close: 100.5,
     });
-    expect(service.getChart("us-aapl", "DAY")?.candles.at(-1)).toMatchObject(
+    expect((await service.getChart("us-aapl", "DAY"))?.candles.at(-1)).toMatchObject(
       {
         time: "2026-07-27T00:00:00.000Z",
         close: 100.5,
@@ -118,7 +118,7 @@ describe("CandleService", () => {
     const service = new CandleService(repository, 0);
     await service.initialize();
 
-    const initialDay = service.getChart("us-aapl", "DAY");
+    const initialDay = await service.getChart("us-aapl", "DAY");
     expect(initialDay?.source).toBe("DATABASE_RECORDED");
     expect(initialDay?.candles).toHaveLength(1);
     expect(initialDay?.candles[0]).toMatchObject({
@@ -128,7 +128,7 @@ describe("CandleService", () => {
 
     now = new Date("2026-07-27T12:00:40.000Z");
     await service.recordQuotes(await engine.tick());
-    const firstMinute = service.getChart("us-aapl", "INTRADAY");
+    const firstMinute = await service.getChart("us-aapl", "INTRADAY");
     expect(firstMinute?.candles).toHaveLength(1);
     expect(firstMinute?.candles[0]).toMatchObject({
       source: "MARKET_TICK",
@@ -140,7 +140,7 @@ describe("CandleService", () => {
     await service.recordQuotes(await engine.tick());
     await service.flush();
 
-    const twoMinutes = service.getChart("us-aapl", "INTRADAY");
+    const twoMinutes = await service.getChart("us-aapl", "INTRADAY");
     expect(twoMinutes?.candles).toHaveLength(2);
     expect(twoMinutes?.candles[0]?.isPartial).toBe(false);
     expect(twoMinutes?.candles[1]?.isPartial).toBe(true);
@@ -148,12 +148,12 @@ describe("CandleService", () => {
     const reloaded = new CandleService(repository, 0);
     await reloaded.initialize();
     expect(
-      reloaded.getChart("us-aapl", "INTRADAY")?.candles,
+      (await reloaded.getChart("us-aapl", "INTRADAY"))?.candles,
     ).toHaveLength(2);
-    expect(reloaded.getChart("us-aapl", "MONTH")?.candles).toHaveLength(
+    expect((await reloaded.getChart("us-aapl", "MONTH"))?.candles).toHaveLength(
       1,
     );
-    expect(reloaded.getChart("us-aapl", "YEAR")?.candles).toHaveLength(
+    expect((await reloaded.getChart("us-aapl", "YEAR"))?.candles).toHaveLength(
       1,
     );
   });

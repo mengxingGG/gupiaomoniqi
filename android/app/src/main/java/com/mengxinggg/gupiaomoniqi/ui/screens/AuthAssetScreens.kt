@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,19 +66,41 @@ fun AuthScreen(
     state: AppUiState,
     onBack: () -> Unit,
     onModeChange: (AuthMode) -> Unit,
-    onSubmit: (AuthMode, String, String, String) -> Unit,
+    onSubmit: (AuthMode, String, String, String, String) -> Unit,
+    onResetRequest: (String) -> Unit,
+    onResetConfirm: (String, String, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var username by rememberSaveable { mutableStateOf("") }
+    var email by rememberSaveable { mutableStateOf("") }
     var displayName by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
-    val canSubmit = username.isNotBlank() &&
-        password.isNotBlank() &&
-        (state.authMode == AuthMode.LOGIN || displayName.isNotBlank())
+    var resetCode by rememberSaveable { mutableStateOf("") }
+    val canSubmit = when (state.authMode) {
+        AuthMode.REGISTER -> username.isNotBlank() && email.isNotBlank() &&
+            displayName.isNotBlank() && password.isNotBlank()
+        AuthMode.LOGIN -> username.isNotBlank() && password.isNotBlank()
+        AuthMode.RESET -> email.isNotBlank() &&
+            (!state.authResetCodeSent || (resetCode.length == 6 && password.isNotBlank()))
+    }
 
     fun submit() {
         if (canSubmit && !state.authBusy) {
-            onSubmit(state.authMode, username.trim(), displayName.trim(), password)
+            if (state.authMode == AuthMode.RESET) {
+                if (state.authResetCodeSent) {
+                    onResetConfirm(email.trim(), resetCode, password)
+                } else {
+                    onResetRequest(email.trim())
+                }
+            } else {
+                onSubmit(
+                    state.authMode,
+                    username.trim(),
+                    email.trim(),
+                    displayName.trim(),
+                    password,
+                )
+            }
         }
     }
 
@@ -133,10 +156,10 @@ fun AuthScreen(
                     }
 
                     Text(
-                        if (state.authMode == AuthMode.REGISTER) {
-                            "创建模拟交易账户"
-                        } else {
-                            "欢迎回来"
+                        when (state.authMode) {
+                            AuthMode.REGISTER -> "创建模拟交易账户"
+                            AuthMode.LOGIN -> "欢迎回来"
+                            AuthMode.RESET -> "通过邮箱找回密码"
                         },
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
@@ -153,30 +176,101 @@ fun AuthScreen(
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                         )
                     }
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it.take(20) },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("用户名") },
-                        placeholder = { Text("字母、数字或下划线") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                    )
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it.take(128) },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("密码") },
-                        supportingText = {
-                            if (state.authMode == AuthMode.REGISTER) {
-                                Text("至少 8 位，建议包含大小写字母与数字")
-                            }
-                        },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { submit() }),
-                    )
+                    if (state.authMode == AuthMode.REGISTER || state.authMode == AuthMode.RESET) {
+                        OutlinedTextField(
+                            value = email,
+                            onValueChange = { email = it.take(254) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !(state.authMode == AuthMode.RESET && state.authResetCodeSent),
+                            label = { Text("邮箱") },
+                            placeholder = { Text("name@example.com") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Email,
+                                imeAction = ImeAction.Next,
+                            ),
+                        )
+                    }
+                    if (state.authMode != AuthMode.RESET) {
+                        OutlinedTextField(
+                            value = username,
+                            onValueChange = {
+                                username = it.take(if (state.authMode == AuthMode.REGISTER) 20 else 254)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = {
+                                Text(if (state.authMode == AuthMode.LOGIN) "用户名或邮箱" else "用户名")
+                            },
+                            placeholder = {
+                                Text(
+                                    if (state.authMode == AuthMode.LOGIN) {
+                                        "输入用户名或邮箱"
+                                    } else {
+                                        "字母、数字或下划线"
+                                    },
+                                )
+                            },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                        )
+                    }
+                    if (state.authMode == AuthMode.RESET && state.authResetCodeSent) {
+                        OutlinedTextField(
+                            value = resetCode,
+                            onValueChange = { value ->
+                                resetCode = value.filter(Char::isDigit).take(6)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("六位验证码") },
+                            placeholder = { Text("000000") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.NumberPassword,
+                                imeAction = ImeAction.Next,
+                            ),
+                        )
+                    }
+                    if (state.authMode != AuthMode.RESET || state.authResetCodeSent) {
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it.take(128) },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = {
+                                Text(if (state.authMode == AuthMode.RESET) "新密码" else "密码")
+                            },
+                            supportingText = {
+                                if (state.authMode != AuthMode.LOGIN) {
+                                    Text("至少 8 位，同时包含大小写字母与数字")
+                                }
+                            },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { submit() }),
+                        )
+                    }
+                    if (state.authMode == AuthMode.LOGIN) {
+                        TextButton(onClick = { onModeChange(AuthMode.RESET) }) {
+                            Text("忘记密码？使用邮箱找回")
+                        }
+                    } else if (state.authMode == AuthMode.RESET) {
+                        TextButton(onClick = { onModeChange(AuthMode.LOGIN) }) {
+                            Text("← 返回登录")
+                        }
+                    }
+                    if (state.authNotice != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Text(
+                                state.authNotice,
+                                modifier = Modifier.padding(11.dp),
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
                     if (state.authError != null) {
                         Surface(
                             color = MaterialTheme.colorScheme.errorContainer,
@@ -199,7 +293,9 @@ fun AuthScreen(
                             when {
                                 state.authBusy -> "请稍候…"
                                 state.authMode == AuthMode.REGISTER -> "注册并领取模拟资金"
-                                else -> "登录账户"
+                                state.authMode == AuthMode.LOGIN -> "登录账户"
+                                state.authResetCodeSent -> "验证并设置新密码"
+                                else -> "发送六位验证码"
                             },
                         )
                     }
@@ -268,7 +364,7 @@ fun AssetsScreen(
                         fontWeight = FontWeight.Bold,
                     )
                     Text(
-                        "两个模拟盘资金与持仓互相隔离",
+                        account.email ?: "尚未绑定找回邮箱",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.labelSmall,
                     )

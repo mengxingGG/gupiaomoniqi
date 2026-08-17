@@ -19,6 +19,8 @@ export const accounts = pgTable(
     id: uuid("id").primaryKey(),
     username: text("username").notNull(),
     usernameNormalized: text("username_normalized").notNull(),
+    email: text("email"),
+    emailNormalized: text("email_normalized"),
     passwordHash: text("password_hash").notNull(),
     displayName: text("display_name").notNull(),
     displayCurrency: text("display_currency").notNull().default("USD"),
@@ -36,6 +38,9 @@ export const accounts = pgTable(
   (table) => [
     uniqueIndex("accounts_username_normalized_unique").on(
       table.usernameNormalized,
+    ),
+    uniqueIndex("accounts_email_normalized_unique").on(
+      table.emailNormalized,
     ),
   ],
 );
@@ -398,6 +403,74 @@ export const aiTraders = pgTable(
       table.nextActionAt,
     ),
     uniqueIndex("ai_traders_persona_key_unique").on(table.personaKey),
+  ],
+);
+
+export const passwordResetChallenges = pgTable(
+  "password_reset_challenges",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull(),
+    expiresAt: timestamp("expires_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    attemptsRemaining: integer("attempts_remaining").notNull().default(5),
+    consumedAt: timestamp("consumed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("password_reset_account_created_index").on(
+      table.accountId,
+      table.createdAt,
+    ),
+    index("password_reset_expiry_index").on(table.expiresAt),
+  ],
+);
+
+export const emailVerificationChallenges = pgTable(
+  "email_verification_challenges",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    emailNormalized: text("email_normalized").notNull(),
+    codeHash: text("code_hash").notNull(),
+    expiresAt: timestamp("expires_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    attemptsRemaining: integer("attempts_remaining").notNull().default(5),
+    consumedAt: timestamp("consumed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("email_verification_account_created_index").on(
+      table.accountId,
+      table.createdAt,
+    ),
+    index("email_verification_expiry_index").on(table.expiresAt),
   ],
 );
 

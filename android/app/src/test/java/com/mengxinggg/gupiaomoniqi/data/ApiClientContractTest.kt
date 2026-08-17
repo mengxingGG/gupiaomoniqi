@@ -341,6 +341,87 @@ class ApiClientContractTest {
     }
 
     @Test
+    fun `password reset endpoints send email code and new password without bearer token`() {
+        val requests = mutableListOf<HttpRequest>()
+        val client = ApiClient(
+            InMemoryTokenStore(
+                initialToken = "existing-token",
+                initialBaseUrl = TEST_BASE_URL,
+            ),
+        ) { request ->
+            requests += request
+            if (request.url.endsWith("/request")) {
+                HttpResponse(202, """{"data":{"accepted":true,"expiresInSeconds":600}}""")
+            } else {
+                HttpResponse(200, """{"data":{"reset":true}}""")
+            }
+        }
+
+        val requested = client.requestPasswordReset("user@example.com")
+        val confirmed = client.confirmPasswordReset(
+            "user@example.com",
+            "123456",
+            "NewPassword1",
+        )
+
+        assertTrue(requested.accepted)
+        assertEquals(600, requested.expiresInSeconds)
+        assertTrue(confirmed.reset)
+        assertEquals(2, requests.size)
+        assertTrue(requests.none { it.headers.containsKey("Authorization") })
+        assertEquals(
+            "user@example.com",
+            JSONObject(requests[0].body!!).getString("email"),
+        )
+        val confirmation = JSONObject(requests[1].body!!)
+        assertEquals("123456", confirmation.getString("code"))
+        assertEquals("NewPassword1", confirmation.getString("newPassword"))
+    }
+
+    @Test
+    fun `legacy email verification uses current bearer session and returns updated account`() {
+        val requests = mutableListOf<HttpRequest>()
+        val client = ApiClient(
+            InMemoryTokenStore(
+                initialToken = "legacy-session",
+                initialBaseUrl = TEST_BASE_URL,
+            ),
+        ) { request ->
+            requests += request
+            if (request.url.endsWith("/request")) {
+                HttpResponse(202, """{"data":{"accepted":true,"expiresInSeconds":600}}""")
+            } else {
+                HttpResponse(
+                    200,
+                    """{"data":${TestJson.accountWithEmail("legacy@example.com")}}""",
+                )
+            }
+        }
+
+        val requested = client.requestEmailVerification("legacy@example.com")
+        val account = client.confirmEmailVerification(
+            "legacy@example.com",
+            "654321",
+        )
+
+        assertTrue(requested.accepted)
+        assertEquals("legacy@example.com", account.email)
+        assertTrue(
+            requests.all {
+                it.headers["Authorization"] == "Bearer legacy-session"
+            },
+        )
+        assertEquals(
+            "legacy@example.com",
+            JSONObject(requests[0].body!!).getString("email"),
+        )
+        assertEquals(
+            "654321",
+            JSONObject(requests[1].body!!).getString("code"),
+        )
+    }
+
+    @Test
     fun `login stores token without sending an old bearer token`() {
         lateinit var recorded: HttpRequest
         val store = InMemoryTokenStore(

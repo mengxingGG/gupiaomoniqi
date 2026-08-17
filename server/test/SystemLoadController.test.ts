@@ -5,6 +5,41 @@ import {
 } from "../src/runtime/SystemLoadController.js";
 
 describe("SystemLoadController", () => {
+  it("仅有 AI 积压时不进入降载自锁", () => {
+    const controller = new SystemLoadController(
+      {
+        aiStatus: () => null,
+        realStatus: () => null,
+      },
+      {
+        aiActivePerRound: 320,
+        aiRoundIntervalMs: 1_000,
+        realConcurrency: 2,
+        realHotRefreshIntervalMs: 1_000,
+        realHotPagesPerRound: 1,
+        realFullSweepTargetMs: 300_000,
+      },
+      {
+        metricsProvider: () => ({
+          cpuPercent: 20,
+          rssRatio: 0.3,
+          heapRatio: 0.35,
+          eventLoopLagMs: 8,
+          aiBacklog: 4_500,
+          realSweepPressure: 0.1,
+          sampledAt: "2026-08-17T10:00:00.000Z",
+        }),
+      },
+    );
+
+    controller.sampleNow();
+    expect(controller.getStatus().level).toBe("NORMAL");
+    expect(controller.getAiSettings()).toEqual({
+      activePerRound: 320,
+      intervalMs: 1_000,
+    });
+  });
+
   it("高压时降低 AI 与真实行情负载，恢复后逐步回升", () => {
     const samples: SystemLoadSample[] = [
       {

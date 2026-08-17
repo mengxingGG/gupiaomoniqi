@@ -120,10 +120,10 @@ export class CandleService {
     this.#lastPersistedAt = Date.now();
   }
 
-  getChart(
+  async getChart(
     instrumentId: string,
     range: ChartRange,
-  ): ChartSeries | undefined {
+  ): Promise<ChartSeries | undefined> {
     const quote = this.repository.getQuote(instrumentId);
 
     if (!quote || !this.repository.getInstrumentById(instrumentId)) {
@@ -132,22 +132,25 @@ export class CandleService {
 
     const candles =
       range === "INTRADAY"
-        ? this.#withCurrent(
+        ? (await this.#withCurrent(
             instrumentId,
             "MINUTE",
             this.#currentMinutes.get(instrumentId),
-          ).slice(-240)
+            240,
+          )).slice(-240)
         : range === "DAY"
-          ? this.#withCurrent(
+          ? (await this.#withCurrent(
               instrumentId,
               "DAY",
               this.#currentDays.get(instrumentId),
-            ).slice(-160)
+              160,
+            )).slice(-160)
           : aggregateCandles(
-              this.#withCurrent(
+              await this.#withCurrent(
                 instrumentId,
                 "DAY",
                 this.#currentDays.get(instrumentId),
+                range === "MONTH" ? 2_200 : 4_500,
               ),
               range,
             ).slice(range === "MONTH" ? -72 : -12);
@@ -208,15 +211,17 @@ export class CandleService {
     });
   }
 
-  #withCurrent(
+  async #withCurrent(
     instrumentId: string,
     interval: CandleInterval,
     current: CandleRecord | undefined,
-  ): CandleRecord[] {
+    limit: number,
+  ): Promise<CandleRecord[]> {
+    const stored = this.repository.loadCandles
+      ? await this.repository.loadCandles(instrumentId, interval, limit)
+      : this.repository.listCandles(instrumentId, interval).slice(-limit);
     const byTime = new Map(
-      this.repository
-        .listCandles(instrumentId, interval)
-        .map((candle) => [candle.time, candle]),
+      stored.map((candle) => [candle.time, candle]),
     );
 
     if (current) {

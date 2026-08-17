@@ -143,6 +143,7 @@ $safeRoot = Assert-SafeDeploymentRoot -Root $Root
 $releaseDirectory = Join-Path $safeRoot "current"
 $entryPoint = Join-Path $releaseDirectory "server\dist\index.js"
 $nodeExecutable = Resolve-NodeExecutable -Root $safeRoot -NodePath $NodePath
+$nodeHeapLimitMb = 4096
 
 if (-not (Test-Path -LiteralPath $entryPoint -PathType Leaf)) {
     throw "生产入口不存在：$entryPoint。请先完成 npm run build 并部署 current 目录。"
@@ -314,12 +315,14 @@ Write-AtomicJson -Path $latestPath -Value ([ordered]@{
     port = $Port
     realMarketSyncEnabled = (-not $DisableRealMarketSync)
     aiTradingEnabled = (-not $DisableAiTrading)
+    nodeHeapLimitMb = $nodeHeapLimitMb
 })
 
 Write-LauncherLog -Path $logs.Launcher -Message (
-    "启动应用；Node={0}；WorkingDirectory={1}" -f
+    "启动应用；Node={0}；WorkingDirectory={1}；HeapLimitMb={2}" -f
         $nodeExecutable,
-        $releaseDirectory
+        $releaseDirectory,
+        $nodeHeapLimitMb
 )
 if ($pythonFallback.available) {
     Write-LauncherLog -Path $logs.Launcher -Message (
@@ -362,6 +365,7 @@ try {
         $env:APP_SHUTDOWN_CONFIRMATION_PATH = $shutdownConfirmationPath
         $env:APP_INSTANCE_NONCE = $instanceNonce
         $entryPointArgument = ConvertTo-TaskQuotedArgument -Value $entryPoint
+        $heapLimitArgument = "--max-old-space-size=$nodeHeapLimitMb"
         $markerArgument = ConvertTo-TaskQuotedArgument -Value $processMarker
         $rootIdentityArgument = ConvertTo-TaskQuotedArgument `
             -Value $rootIdentityMarker
@@ -370,6 +374,7 @@ try {
         $process = Start-Process `
             -FilePath $nodeExecutable `
             -ArgumentList @(
+                $heapLimitArgument,
                 $entryPointArgument,
                 $markerArgument,
                 $rootIdentityArgument,
@@ -424,6 +429,7 @@ try {
         port = $Port
         realMarketSyncEnabled = (-not $DisableRealMarketSync)
         aiTradingEnabled = (-not $DisableAiTrading)
+        nodeHeapLimitMb = $nodeHeapLimitMb
         pythonFallback = $pythonFallback
         stdout = $logs.Stdout
         stderr = $logs.Stderr

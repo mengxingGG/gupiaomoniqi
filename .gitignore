@@ -1,7 +1,6 @@
 node_modules/
 dist/
 coverage/
-docs/
 logs/
 .deploy-artifacts/
 .deploy-askpass.cmd

@@ -17,6 +17,7 @@ describe("AITradingService", () => {
       () => now,
       true,
     );
+    const listInstrumentsSpy = vi.spyOn(repository, "listInstruments");
 
     expect(await service.ensurePopulation(14)).toBe(14);
     const updateTradersSpy = vi.spyOn(
@@ -38,6 +39,7 @@ describe("AITradingService", () => {
 
     expect(round.activeTraders).toBe(14);
     expect(round.trades).toBeGreaterThan(0);
+    expect(listInstrumentsSpy).toHaveBeenCalledTimes(1);
     expect(service.getStatus().lifetimeTrades).toBe(round.trades);
     expect(service.getStatus().recentTradesPerMinute).toBe(
       round.trades,
@@ -100,6 +102,7 @@ describe("AITradingService", () => {
         0,
       );
     expect(totalFlow).toBeGreaterThan(0);
+    listInstrumentsSpy.mockClear();
     expect(service.getRanking(5)).toHaveLength(5);
 
     const profitableQuotes = repository
@@ -122,6 +125,7 @@ describe("AITradingService", () => {
     const sellRound = await service.runRound(14);
 
     expect(sellRound.sellVolume).toBeGreaterThan(0);
+    expect(listInstrumentsSpy).not.toHaveBeenCalled();
     expect(
       repository.listTransactions(cnTrader!.portfolioId),
     ).toHaveLength(0);

@@ -1107,6 +1107,7 @@ describe("真实行情完整模块", () => {
         url: "/api/auth/register",
         payload: {
           username: "real_market_trader",
+          email: "real_market_trader@example.com",
           displayName: "真实行情测试员",
           password: "ValidPass123",
         },
@@ -1263,6 +1264,7 @@ describe("真实行情完整模块", () => {
         url: "/api/auth/register",
         payload: {
           username: "real_limit_trader",
+          email: "real_limit_trader@example.com",
           displayName: "真实限价测试员",
           password: "ValidPass123",
         },
@@ -1365,6 +1367,7 @@ describe("真实行情完整模块", () => {
         url: "/api/auth/register",
         payload: {
           username: "watchlist_trader",
+          email: "watchlist_trader@example.com",
           displayName: "自选测试员",
           password: "ValidPass123",
         },

@@ -6,6 +6,7 @@ import com.mengxinggg.gupiaomoniqi.model.ChartRange
 import com.mengxinggg.gupiaomoniqi.model.ChartSeries
 import com.mengxinggg.gupiaomoniqi.model.Currency
 import com.mengxinggg.gupiaomoniqi.model.DailyCheckInStatus
+import com.mengxinggg.gupiaomoniqi.model.EmailVerificationRequestResult
 import com.mengxinggg.gupiaomoniqi.model.IndustryCount
 import com.mengxinggg.gupiaomoniqi.model.Market
 import com.mengxinggg.gupiaomoniqi.model.MarketItem
@@ -19,6 +20,8 @@ import com.mengxinggg.gupiaomoniqi.model.OrderSubmissionResult
 import com.mengxinggg.gupiaomoniqi.model.Page
 import com.mengxinggg.gupiaomoniqi.model.Portfolio
 import com.mengxinggg.gupiaomoniqi.model.PublicAccount
+import com.mengxinggg.gupiaomoniqi.model.PasswordResetConfirmResult
+import com.mengxinggg.gupiaomoniqi.model.PasswordResetRequestResult
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
 import com.mengxinggg.gupiaomoniqi.model.Transaction
@@ -36,11 +39,25 @@ interface StockRepository {
 
     suspend fun register(
         username: String,
+        email: String,
         password: String,
         displayName: String,
     ): AuthResult
 
     suspend fun login(username: String, password: String): AuthResult
+    suspend fun requestPasswordReset(email: String): PasswordResetRequestResult
+    suspend fun confirmPasswordReset(
+        email: String,
+        code: String,
+        newPassword: String,
+    ): PasswordResetConfirmResult
+    suspend fun requestEmailVerification(
+        email: String,
+    ): EmailVerificationRequestResult
+    suspend fun confirmEmailVerification(
+        email: String,
+        code: String,
+    ): PublicAccount
     suspend fun logout()
     suspend fun getCurrentAccount(): PublicAccount
     suspend fun updateDisplayCurrency(currency: Currency): PublicAccount
@@ -131,14 +148,40 @@ class DefaultStockRepository(
 
     override suspend fun register(
         username: String,
+        email: String,
         password: String,
         displayName: String,
-    ): AuthResult = io { apiClient.register(username, password, displayName) }
+    ): AuthResult = io { apiClient.register(username, email, password, displayName) }
 
     override suspend fun login(
         username: String,
         password: String,
     ): AuthResult = io { apiClient.login(username, password) }
+
+    override suspend fun requestPasswordReset(
+        email: String,
+    ): PasswordResetRequestResult = io { apiClient.requestPasswordReset(email) }
+
+    override suspend fun confirmPasswordReset(
+        email: String,
+        code: String,
+        newPassword: String,
+    ): PasswordResetConfirmResult = io {
+        apiClient.confirmPasswordReset(email, code, newPassword)
+    }
+
+    override suspend fun requestEmailVerification(
+        email: String,
+    ): EmailVerificationRequestResult = io {
+        apiClient.requestEmailVerification(email)
+    }
+
+    override suspend fun confirmEmailVerification(
+        email: String,
+        code: String,
+    ): PublicAccount = io {
+        apiClient.confirmEmailVerification(email, code)
+    }
 
     override suspend fun logout(): Unit = io { apiClient.logout() }
 

@@ -225,6 +225,7 @@ export function AccountPage({
         </div>
         <div className="account-identity">
           <span>@{account.username}</span>
+          <span>{account.email ?? "尚未绑定找回邮箱"}</span>
           <strong>{modeLabel(mode)}</strong>
         </div>
       </section>

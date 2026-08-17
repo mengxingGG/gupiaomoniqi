@@ -12,10 +12,12 @@ import type {
   CandleRecord,
   CreateAITraderCommit,
   CreateAccountCommit,
+  EmailVerificationChallengeRecord,
   GameRepository,
   InstrumentRecord,
   OrderRecord,
   OrderStateCommit,
+  PasswordResetChallengeRecord,
   PortfolioRecord,
   PositionRecord,
   SessionRecord,
@@ -30,7 +32,16 @@ export class MemoryGameRepository implements GameRepository {
   readonly #candles = new Map<string, Map<string, CandleRecord>>();
   readonly #accounts = new Map<string, AccountRecord>();
   readonly #accountIdsByUsername = new Map<string, string>();
+  readonly #accountIdsByEmail = new Map<string, string>();
   readonly #sessions = new Map<string, SessionRecord>();
+  readonly #passwordResetChallenges = new Map<
+    string,
+    PasswordResetChallengeRecord
+  >();
+  readonly #emailVerificationChallenges = new Map<
+    string,
+    EmailVerificationChallengeRecord
+  >();
   readonly #portfolios = new Map<string, PortfolioRecord>();
   readonly #portfolioIdsByAccount = new Map<string, string>();
   readonly #positions = new Map<string, Map<string, PositionRecord>>();
@@ -114,12 +125,24 @@ export class MemoryGameRepository implements GameRepository {
     ) {
       throw new Error("ACCOUNT_EXISTS");
     }
+    if (
+      commit.account.emailNormalized &&
+      this.#accountIdsByEmail.has(commit.account.emailNormalized)
+    ) {
+      throw new Error("EMAIL_EXISTS");
+    }
 
     this.#accounts.set(commit.account.id, structuredClone(commit.account));
     this.#accountIdsByUsername.set(
       commit.account.usernameNormalized,
       commit.account.id,
     );
+    if (commit.account.emailNormalized) {
+      this.#accountIdsByEmail.set(
+        commit.account.emailNormalized,
+        commit.account.id,
+      );
+    }
     this.#portfolios.set(
       commit.portfolio.id,
       structuredClone(commit.portfolio),
@@ -144,9 +167,72 @@ export class MemoryGameRepository implements GameRepository {
     return accountId ? this.getAccountById(accountId) : undefined;
   }
 
+  getAccountByEmail(emailNormalized: string): AccountRecord | undefined {
+    const accountId = this.#accountIdsByEmail.get(emailNormalized);
+    return accountId ? this.getAccountById(accountId) : undefined;
+  }
+
   async updateLastLogin(accountId: string, at: string): Promise<void> {
     const account = this.#requireAccount(accountId);
     account.lastLoginAt = at;
+  }
+
+  async resetPassword(
+    accountId: string,
+    passwordHash: string,
+    challengeId?: string,
+  ): Promise<void> {
+    if (challengeId) {
+      const challenge = this.#passwordResetChallenges.get(accountId);
+      if (
+        !challenge ||
+        challenge.id !== challengeId ||
+        challenge.consumedAt
+      ) {
+        throw new Error("PASSWORD_RESET_CHALLENGE_CONSUMED");
+      }
+    }
+    const account = this.#requireAccount(accountId);
+    account.passwordHash = passwordHash;
+    for (const [tokenHash, session] of this.#sessions) {
+      if (session.accountId === accountId) {
+        this.#sessions.delete(tokenHash);
+      }
+    }
+    if (challengeId) {
+      const challenge = this.#passwordResetChallenges.get(accountId);
+      challenge!.consumedAt = new Date().toISOString();
+    }
+  }
+
+  async bindAccountEmail(
+    accountId: string,
+    email: string,
+    emailNormalized: string,
+    challengeId: string,
+  ): Promise<void> {
+    const account = this.#requireAccount(accountId);
+    const challenge = this.#emailVerificationChallenges.get(accountId);
+    if (account.emailNormalized) {
+      throw new Error("ACCOUNT_EMAIL_ALREADY_SET");
+    }
+    if (
+      !challenge ||
+      challenge.id !== challengeId ||
+      challenge.emailNormalized !== emailNormalized ||
+      challenge.consumedAt
+    ) {
+      throw new Error("EMAIL_VERIFICATION_CHALLENGE_CONSUMED");
+    }
+    const existingAccountId = this.#accountIdsByEmail.get(emailNormalized);
+    if (existingAccountId && existingAccountId !== accountId) {
+      throw new Error("EMAIL_EXISTS");
+    }
+
+    account.email = email;
+    account.emailNormalized = emailNormalized;
+    this.#accountIdsByEmail.set(emailNormalized, accountId);
+    challenge.consumedAt = new Date().toISOString();
   }
 
   async updateDisplayCurrency(
@@ -178,6 +264,94 @@ export class MemoryGameRepository implements GameRepository {
 
   async deleteSession(tokenHash: string): Promise<void> {
     this.#sessions.delete(tokenHash);
+  }
+
+  async replacePasswordResetChallenge(
+    challenge: PasswordResetChallengeRecord,
+  ): Promise<void> {
+    this.#passwordResetChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  getPasswordResetChallenge(
+    accountId: string,
+  ): PasswordResetChallengeRecord | undefined {
+    const challenge = this.#passwordResetChallenges.get(accountId);
+    return challenge ? structuredClone(challenge) : undefined;
+  }
+
+  async updatePasswordResetChallenge(
+    challenge: PasswordResetChallengeRecord,
+  ): Promise<void> {
+    this.#passwordResetChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  async recordPasswordResetFailure(
+    accountId: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number> {
+    const challenge = this.#passwordResetChallenges.get(accountId);
+    if (!challenge || challenge.id !== challengeId || challenge.consumedAt) {
+      return 0;
+    }
+    challenge.attemptsRemaining = Math.max(
+      0,
+      challenge.attemptsRemaining - 1,
+    );
+    if (challenge.attemptsRemaining === 0) {
+      challenge.consumedAt = at;
+    }
+    return challenge.attemptsRemaining;
+  }
+
+  async replaceEmailVerificationChallenge(
+    challenge: EmailVerificationChallengeRecord,
+  ): Promise<void> {
+    this.#emailVerificationChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  getEmailVerificationChallenge(
+    accountId: string,
+  ): EmailVerificationChallengeRecord | undefined {
+    const challenge = this.#emailVerificationChallenges.get(accountId);
+    return challenge ? structuredClone(challenge) : undefined;
+  }
+
+  async updateEmailVerificationChallenge(
+    challenge: EmailVerificationChallengeRecord,
+  ): Promise<void> {
+    this.#emailVerificationChallenges.set(
+      challenge.accountId,
+      structuredClone(challenge),
+    );
+  }
+
+  async recordEmailVerificationFailure(
+    accountId: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number> {
+    const challenge = this.#emailVerificationChallenges.get(accountId);
+    if (!challenge || challenge.id !== challengeId || challenge.consumedAt) {
+      return 0;
+    }
+    challenge.attemptsRemaining = Math.max(
+      0,
+      challenge.attemptsRemaining - 1,
+    );
+    if (challenge.attemptsRemaining === 0) {
+      challenge.consumedAt = at;
+    }
+    return challenge.attemptsRemaining;
   }
 
   getPortfolioByAccountId(
