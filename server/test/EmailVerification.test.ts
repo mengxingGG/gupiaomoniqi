@@ -20,6 +20,7 @@ import { createTestHarness } from "./helpers.js";
 
 class CapturingAccountMailer implements PasswordResetMailer {
   readonly verificationMessages: EmailVerificationMail[] = [];
+  readonly registrationVerificationMessages: EmailVerificationMail[] = [];
 
   async sendPasswordResetCode(_mail: PasswordResetMail): Promise<void> {}
 
@@ -28,9 +29,71 @@ class CapturingAccountMailer implements PasswordResetMailer {
   ): Promise<void> {
     this.verificationMessages.push(mail);
   }
+
+  async sendRegistrationEmailVerificationCode(
+    mail: EmailVerificationMail,
+  ): Promise<void> {
+    this.registrationVerificationMessages.push(mail);
+  }
 }
 
 describe("旧账户补充邮箱", () => {
+  it("注册邮箱验证码跨重启有效，并在建号事务中一次性消费", async () => {
+    const client = new PGlite();
+    await client.waitReady;
+    const connection = {
+      client,
+      db: drizzle({ client, schema }),
+    };
+    try {
+      await migrateDatabase(client);
+      const issuedAt = new Date();
+      const repository = await DatabaseGameRepository.create(connection);
+      const mailer = new CapturingAccountMailer();
+      const service = new AuthService(repository, () => issuedAt, mailer);
+      await service.requestRegistrationEmailVerification({
+        email: "new-user@example.com",
+      });
+
+      const reloaded = await DatabaseGameRepository.create(connection);
+      const reloadedService = new AuthService(
+        reloaded,
+        () => new Date(issuedAt.getTime() + 60_000),
+        mailer,
+      );
+      const confirmation =
+        await reloadedService.confirmRegistrationEmailVerification({
+          email: "new-user@example.com",
+          code: mailer.registrationVerificationMessages[0]!.code,
+        });
+      const auth = await reloadedService.register({
+        username: "verified_new_user",
+        email: "new-user@example.com",
+        displayName: "已验证新用户",
+        password: "VerifiedPass123",
+        emailVerificationToken: confirmation.verificationToken,
+      });
+      expect(auth.account).toMatchObject({
+        username: "verified_new_user",
+        email: "new-user@example.com",
+      });
+
+      const persisted = await client.query<{
+        verified_at: Date | string | null;
+        consumed_at: Date | string | null;
+      }>(
+        `SELECT verified_at, consumed_at
+           FROM registration_email_challenges
+          WHERE id = $1`,
+        [confirmation.verificationToken],
+      );
+      expect(persisted.rows[0]?.verified_at).not.toBeNull();
+      expect(persisted.rows[0]?.consumed_at).not.toBeNull();
+    } finally {
+      await client.close();
+    }
+  });
+
   it("服务重启后仍可验证未过期验证码并持久化邮箱", async () => {
     const client = new PGlite();
     await client.waitReady;
@@ -226,6 +289,7 @@ describe("旧账户补充邮箱", () => {
       expect(health.json().data.emailDelivery).toEqual({
         configured: true,
         mode: "SMTP_SEND_ONLY",
+        registrationVerificationRequired: true,
       });
       const login = await context.app.inject({
         method: "POST",

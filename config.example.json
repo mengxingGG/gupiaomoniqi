@@ -1,4 +1,14 @@
 {
+  "smtp": {
+    "enabled": false,
+    "host": "smtp.qq.com",
+    "port": 465,
+    "secure": true,
+    "requireTls": false,
+    "user": "your-account@qq.com",
+    "pass": "QQ邮箱SMTP授权码",
+    "from": "股票模拟器 <your-account@qq.com>"
+  },
   "llmTrading": {
     "enabled": false,
     "baseUrl": "http://127.0.0.1:8080/v1",

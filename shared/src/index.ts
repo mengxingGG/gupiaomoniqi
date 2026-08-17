@@ -266,6 +266,11 @@ export interface EmailVerificationRequestResult {
   expiresInSeconds: number;
 }
 
+export interface RegistrationEmailVerificationConfirmResult {
+  verificationToken: string;
+  expiresInSeconds: number;
+}
+
 export interface IndustrySummary {
   industry: string;
   count: number;

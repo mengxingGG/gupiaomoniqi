@@ -23,6 +23,7 @@ import com.mengxinggg.gupiaomoniqi.model.PublicAccount
 import com.mengxinggg.gupiaomoniqi.model.PasswordResetConfirmResult
 import com.mengxinggg.gupiaomoniqi.model.PasswordResetRequestResult
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
+import com.mengxinggg.gupiaomoniqi.model.RegistrationEmailVerificationConfirmResult
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
 import com.mengxinggg.gupiaomoniqi.model.Transaction
 import com.mengxinggg.gupiaomoniqi.model.Watchlist
@@ -42,6 +43,7 @@ interface StockRepository {
         email: String,
         password: String,
         displayName: String,
+        emailVerificationToken: String,
     ): AuthResult
 
     suspend fun login(username: String, password: String): AuthResult
@@ -58,6 +60,13 @@ interface StockRepository {
         email: String,
         code: String,
     ): PublicAccount
+    suspend fun requestRegistrationEmailVerification(
+        email: String,
+    ): EmailVerificationRequestResult
+    suspend fun confirmRegistrationEmailVerification(
+        email: String,
+        code: String,
+    ): RegistrationEmailVerificationConfirmResult
     suspend fun logout()
     suspend fun getCurrentAccount(): PublicAccount
     suspend fun updateDisplayCurrency(currency: Currency): PublicAccount
@@ -151,7 +160,16 @@ class DefaultStockRepository(
         email: String,
         password: String,
         displayName: String,
-    ): AuthResult = io { apiClient.register(username, email, password, displayName) }
+        emailVerificationToken: String,
+    ): AuthResult = io {
+        apiClient.register(
+            username,
+            email,
+            password,
+            displayName,
+            emailVerificationToken,
+        )
+    }
 
     override suspend fun login(
         username: String,
@@ -181,6 +199,19 @@ class DefaultStockRepository(
         code: String,
     ): PublicAccount = io {
         apiClient.confirmEmailVerification(email, code)
+    }
+
+    override suspend fun requestRegistrationEmailVerification(
+        email: String,
+    ): EmailVerificationRequestResult = io {
+        apiClient.requestRegistrationEmailVerification(email)
+    }
+
+    override suspend fun confirmRegistrationEmailVerification(
+        email: String,
+        code: String,
+    ): RegistrationEmailVerificationConfirmResult = io {
+        apiClient.confirmRegistrationEmailVerification(email, code)
     }
 
     override suspend fun logout(): Unit = io { apiClient.logout() }

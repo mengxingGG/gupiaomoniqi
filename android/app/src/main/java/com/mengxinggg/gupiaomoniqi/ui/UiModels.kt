@@ -254,6 +254,7 @@ data class AppUiState(
     val authError: String? = null,
     val authNotice: String? = null,
     val authResetCodeSent: Boolean = false,
+    val authRegistrationCodeSent: Boolean = false,
     val emailCompletionBusy: Boolean = false,
     val emailCompletionCodeSent: Boolean = false,
     val emailCompletionError: String? = null,

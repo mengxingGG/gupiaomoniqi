@@ -490,6 +490,7 @@ class AppViewModel(
                 authError = null,
                 authNotice = null,
                 authResetCodeSent = false,
+                authRegistrationCodeSent = false,
                 authBusy = false,
             )
         }
@@ -506,6 +507,22 @@ class AppViewModel(
                 } else {
                     false
                 },
+                authRegistrationCodeSent = if (mode == AuthMode.REGISTER) {
+                    it.authRegistrationCodeSent
+                } else {
+                    false
+                },
+            )
+        }
+    }
+
+    fun resetRegistrationEmailVerification() {
+        if (_uiState.value.authBusy) return
+        _uiState.update {
+            it.copy(
+                authRegistrationCodeSent = false,
+                authError = null,
+                authNotice = null,
             )
         }
     }
@@ -679,6 +696,7 @@ class AppViewModel(
         email: String,
         displayName: String,
         password: String,
+        registrationCode: String,
     ) {
         if (!_uiState.value.serverConfigured) {
             openSettings()
@@ -694,13 +712,61 @@ class AppViewModel(
             _uiState.update { it.copy(authError = "请完整填写账户信息。") }
             return
         }
+        if (mode == AuthMode.REGISTER && !_uiState.value.authRegistrationCodeSent) {
+            val requestEpoch = ++sessionEpoch
+            _uiState.update {
+                it.copy(authBusy = true, authError = null, authNotice = null)
+            }
+            authJob = viewModelScope.launch {
+                runCatching {
+                    repository.requestRegistrationEmailVerification(email.trim())
+                }.onSuccess {
+                    if (sessionEpoch != requestEpoch) return@onSuccess
+                    _uiState.update {
+                        it.copy(
+                            authBusy = false,
+                            authError = null,
+                            authNotice = "六位验证码已经发送到该邮箱，有效期 10 分钟。",
+                            authRegistrationCodeSent = true,
+                        )
+                    }
+                }.onFailure { error ->
+                    if (error is CancellationException) return@onFailure
+                    if (sessionEpoch != requestEpoch) return@onFailure
+                    _uiState.update {
+                        it.copy(
+                            authBusy = false,
+                            authError = error.userMessage("注册验证码发送失败，请稍后再试"),
+                        )
+                    }
+                }
+            }
+            return
+        }
+        if (
+            mode == AuthMode.REGISTER &&
+            !registrationCode.matches(Regex("^\\d{6}$"))
+        ) {
+            _uiState.update { it.copy(authError = "请输入六位注册邮箱验证码。") }
+            return
+        }
         val requestEpoch = ++sessionEpoch
         giftAttempt = null
         _uiState.update { it.copy(authBusy = true, authError = null, authNotice = null) }
         authJob = viewModelScope.launch {
             runCatching {
                 if (mode == AuthMode.REGISTER) {
-                    repository.register(username, email, password, displayName)
+                    val confirmation = repository.confirmRegistrationEmailVerification(
+                        email.trim(),
+                        registrationCode,
+                    )
+                    repository.register(
+                        username,
+                        email.trim(),
+                        password,
+                        displayName,
+                        confirmation.verificationToken,
+                    )
                 } else {
                     repository.login(username, password)
                 }
@@ -718,6 +784,7 @@ class AppViewModel(
                         emailCompletionCodeSent = false,
                         emailCompletionError = null,
                         emailCompletionNotice = null,
+                        authRegistrationCodeSent = false,
                         transientMessage = if (mode == AuthMode.REGISTER) {
                             "注册成功，两个模拟盘已准备就绪。"
                         } else {

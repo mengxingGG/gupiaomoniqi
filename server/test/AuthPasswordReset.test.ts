@@ -11,6 +11,7 @@ import { createTestHarness } from "./helpers.js";
 class CapturingMailer implements PasswordResetMailer {
   readonly messages: PasswordResetMail[] = [];
   readonly emailVerificationMessages: EmailVerificationMail[] = [];
+  readonly registrationVerificationMessages: EmailVerificationMail[] = [];
 
   async sendPasswordResetCode(mail: PasswordResetMail): Promise<void> {
     this.messages.push(mail);
@@ -20,6 +21,12 @@ class CapturingMailer implements PasswordResetMailer {
     mail: EmailVerificationMail,
   ): Promise<void> {
     this.emailVerificationMessages.push(mail);
+  }
+
+  async sendRegistrationEmailVerificationCode(
+    mail: EmailVerificationMail,
+  ): Promise<void> {
+    this.registrationVerificationMessages.push(mail);
   }
 }
 
@@ -34,6 +41,25 @@ describe("邮箱密码找回", () => {
       passwordResetMailer: mailer,
     });
     try {
+      const verificationRequest = await context.app.inject({
+        method: "POST",
+        url: "/api/account/email-verification/request",
+        payload: {
+          email: "http_recover@example.com",
+          purpose: "REGISTRATION",
+        },
+      });
+      expect(verificationRequest.statusCode).toBe(202);
+      const verificationConfirm = await context.app.inject({
+        method: "POST",
+        url: "/api/account/email-verification/confirm",
+        payload: {
+          email: "http_recover@example.com",
+          code: mailer.registrationVerificationMessages[0]!.code,
+          purpose: "REGISTRATION",
+        },
+      });
+      expect(verificationConfirm.statusCode).toBe(200);
       const registration = await context.app.inject({
         method: "POST",
         url: "/api/auth/register",
@@ -42,6 +68,8 @@ describe("邮箱密码找回", () => {
           email: "http_recover@example.com",
           displayName: "HTTP 找回测试员",
           password: "OldPass123",
+          emailVerificationToken:
+            verificationConfirm.json().data.verificationToken,
         },
       });
       expect(registration.statusCode).toBe(201);

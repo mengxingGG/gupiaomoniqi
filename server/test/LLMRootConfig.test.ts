@@ -1,7 +1,9 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   loadRootConfig,
   parseRootConfig,
+  resolveRootConfigPath,
 } from "../src/config/RootConfig.js";
 
 describe("RootConfig LLM 配置", () => {
@@ -13,7 +15,14 @@ describe("RootConfig LLM 配置", () => {
       },
     });
 
-    expect(result).toMatchObject({ state: "MISSING", llmTrading: null, error: null });
+    expect(result).toMatchObject({
+      state: "MISSING",
+      llmTrading: null,
+      error: null,
+      smtpState: "MISSING",
+      smtp: null,
+      smtpError: null,
+    });
   });
 
   it("坏 JSON 和坏参数只返回禁用状态", () => {
@@ -71,5 +80,71 @@ describe("RootConfig LLM 配置", () => {
         ).state,
       ).toBe("INVALID");
     }
+  });
+
+  it("统一按显式路径、APP_CONFIG_PATH、工作目录的顺序解析", () => {
+    const previous = process.env.APP_CONFIG_PATH;
+    const environmentPath = "persistent/config.json";
+    try {
+      process.env.APP_CONFIG_PATH = environmentPath;
+      expect(resolveRootConfigPath()).toBe(
+        resolve(process.cwd(), environmentPath),
+      );
+      expect(resolveRootConfigPath("explicit/config.json")).toBe(
+        resolve(process.cwd(), "explicit/config.json"),
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.APP_CONFIG_PATH;
+      } else {
+        process.env.APP_CONFIG_PATH = previous;
+      }
+    }
+  });
+
+  it("读取 QQ 邮箱 SSL 配置且 SMTP 错误不影响有效 LLM", () => {
+    const valid = parseRootConfig(
+      JSON.stringify({
+        smtp: {
+          host: "smtp.qq.com",
+          port: 465,
+          secure: true,
+          user: "mailer@qq.com",
+          pass: "authorization-code",
+          from: "股票模拟器 <mailer@qq.com>",
+        },
+      }),
+    );
+    expect(valid).toMatchObject({
+      state: "DISABLED",
+      smtpState: "ENABLED",
+      smtp: {
+        host: "smtp.qq.com",
+        port: 465,
+        secure: true,
+        requireTls: false,
+        user: "mailer@qq.com",
+      },
+    });
+
+    const invalidSmtp = parseRootConfig(
+      JSON.stringify({
+        llmTrading: {
+          baseUrl: "http://127.0.0.1:8080/v1",
+          modelId: "local-qwen",
+        },
+        smtp: {
+          host: "smtp.qq.com",
+          from: "股票模拟器 <mailer@qq.com>",
+          user: "mailer@qq.com",
+        },
+      }),
+    );
+    expect(invalidSmtp.state).toBe("ENABLED");
+    expect(invalidSmtp.llmTrading).not.toBeNull();
+    expect(invalidSmtp).toMatchObject({
+      smtpState: "INVALID",
+      smtp: null,
+    });
   });
 });

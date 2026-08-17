@@ -66,7 +66,8 @@ fun AuthScreen(
     state: AppUiState,
     onBack: () -> Unit,
     onModeChange: (AuthMode) -> Unit,
-    onSubmit: (AuthMode, String, String, String, String) -> Unit,
+    onSubmit: (AuthMode, String, String, String, String, String) -> Unit,
+    onRegistrationEmailReset: () -> Unit,
     onResetRequest: (String) -> Unit,
     onResetConfirm: (String, String, String) -> Unit,
     modifier: Modifier = Modifier,
@@ -76,9 +77,11 @@ fun AuthScreen(
     var displayName by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var resetCode by rememberSaveable { mutableStateOf("") }
+    var registrationCode by rememberSaveable { mutableStateOf("") }
     val canSubmit = when (state.authMode) {
         AuthMode.REGISTER -> username.isNotBlank() && email.isNotBlank() &&
-            displayName.isNotBlank() && password.isNotBlank()
+            displayName.isNotBlank() && password.isNotBlank() &&
+            (!state.authRegistrationCodeSent || registrationCode.length == 6)
         AuthMode.LOGIN -> username.isNotBlank() && password.isNotBlank()
         AuthMode.RESET -> email.isNotBlank() &&
             (!state.authResetCodeSent || (resetCode.length == 6 && password.isNotBlank()))
@@ -99,6 +102,7 @@ fun AuthScreen(
                     email.trim(),
                     displayName.trim(),
                     password,
+                    registrationCode,
                 )
             }
         }
@@ -181,7 +185,11 @@ fun AuthScreen(
                             value = email,
                             onValueChange = { email = it.take(254) },
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = !(state.authMode == AuthMode.RESET && state.authResetCodeSent),
+                            enabled = !(
+                                (state.authMode == AuthMode.RESET && state.authResetCodeSent) ||
+                                    (state.authMode == AuthMode.REGISTER &&
+                                        state.authRegistrationCodeSent)
+                                ),
                             label = { Text("邮箱") },
                             placeholder = { Text("name@example.com") },
                             singleLine = true,
@@ -230,6 +238,22 @@ fun AuthScreen(
                             ),
                         )
                     }
+                    if (state.authMode == AuthMode.REGISTER && state.authRegistrationCodeSent) {
+                        OutlinedTextField(
+                            value = registrationCode,
+                            onValueChange = { value ->
+                                registrationCode = value.filter(Char::isDigit).take(6)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("注册邮箱六位验证码") },
+                            placeholder = { Text("000000") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.NumberPassword,
+                                imeAction = ImeAction.Next,
+                            ),
+                        )
+                    }
                     if (state.authMode != AuthMode.RESET || state.authResetCodeSent) {
                         OutlinedTextField(
                             value = password,
@@ -256,6 +280,15 @@ fun AuthScreen(
                     } else if (state.authMode == AuthMode.RESET) {
                         TextButton(onClick = { onModeChange(AuthMode.LOGIN) }) {
                             Text("← 返回登录")
+                        }
+                    } else if (state.authRegistrationCodeSent) {
+                        TextButton(
+                            onClick = {
+                                registrationCode = ""
+                                onRegistrationEmailReset()
+                            },
+                        ) {
+                            Text("← 更换注册邮箱")
                         }
                     }
                     if (state.authNotice != null) {
@@ -292,7 +325,13 @@ fun AuthScreen(
                         Text(
                             when {
                                 state.authBusy -> "请稍候…"
-                                state.authMode == AuthMode.REGISTER -> "注册并领取模拟资金"
+                                state.authMode == AuthMode.REGISTER -> {
+                                    if (state.authRegistrationCodeSent) {
+                                        "验证邮箱并注册"
+                                    } else {
+                                        "发送注册验证码"
+                                    }
+                                }
                                 state.authMode == AuthMode.LOGIN -> "登录账户"
                                 state.authResetCodeSent -> "验证并设置新密码"
                                 else -> "发送六位验证码"

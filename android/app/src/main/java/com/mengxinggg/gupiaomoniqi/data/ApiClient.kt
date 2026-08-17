@@ -22,6 +22,7 @@ import com.mengxinggg.gupiaomoniqi.model.PublicAccount
 import com.mengxinggg.gupiaomoniqi.model.PasswordResetConfirmResult
 import com.mengxinggg.gupiaomoniqi.model.PasswordResetRequestResult
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
+import com.mengxinggg.gupiaomoniqi.model.RegistrationEmailVerificationConfirmResult
 import com.mengxinggg.gupiaomoniqi.model.TradeRequest
 import com.mengxinggg.gupiaomoniqi.model.Transaction
 import com.mengxinggg.gupiaomoniqi.model.Watchlist
@@ -309,12 +310,14 @@ class ApiClient(
         email: String,
         password: String,
         displayName: String,
+        emailVerificationToken: String,
     ): AuthResult {
         val body = JSONObject()
             .put("username", username)
             .put("email", email)
             .put("password", password)
             .put("displayName", displayName)
+            .put("emailVerificationToken", emailVerificationToken)
         val decoded = requestObjectWithExecution(
             method = "POST",
             path = "/api/auth/register",
@@ -382,6 +385,32 @@ class ApiClient(
             .put("email", email)
             .put("code", code),
         decode = JsonCodec::publicAccount,
+    )
+
+    fun requestRegistrationEmailVerification(
+        email: String,
+    ): EmailVerificationRequestResult = requestObject(
+        method = "POST",
+        path = "/api/account/email-verification/request",
+        body = JSONObject()
+            .put("email", email)
+            .put("purpose", "REGISTRATION"),
+        includeAuth = false,
+        decode = JsonCodec::emailVerificationRequest,
+    )
+
+    fun confirmRegistrationEmailVerification(
+        email: String,
+        code: String,
+    ): RegistrationEmailVerificationConfirmResult = requestObject(
+        method = "POST",
+        path = "/api/account/email-verification/confirm",
+        body = JSONObject()
+            .put("email", email)
+            .put("code", code)
+            .put("purpose", "REGISTRATION"),
+        includeAuth = false,
+        decode = JsonCodec::registrationEmailVerificationConfirm,
     )
 
     fun me(): PublicAccount = requestObject(

@@ -11,6 +11,19 @@ export interface EmailVerificationMail extends PasswordResetMail {}
 export interface PasswordResetMailer {
   sendPasswordResetCode(mail: PasswordResetMail): Promise<void>;
   sendEmailVerificationCode(mail: EmailVerificationMail): Promise<void>;
+  sendRegistrationEmailVerificationCode(
+    mail: EmailVerificationMail,
+  ): Promise<void>;
+}
+
+export interface SmtpMailerConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  requireTls: boolean;
+  user?: string;
+  pass?: string;
+  from: string;
 }
 
 export class SmtpPasswordResetMailer implements PasswordResetMailer {
@@ -63,6 +76,16 @@ export class SmtpPasswordResetMailer implements PasswordResetMailer {
     });
   }
 
+  async sendRegistrationEmailVerificationCode(
+    mail: EmailVerificationMail,
+  ): Promise<void> {
+    await this.#sendCodeMail({
+      ...mail,
+      subject: "股票模拟器注册邮箱验证码",
+      introduction: "你正在验证股票模拟器新账户的注册邮箱。",
+    });
+  }
+
   async #sendCodeMail(mail: PasswordResetMail & {
     subject: string;
     introduction: string;
@@ -110,6 +133,19 @@ export function createPasswordResetMailerFromEnvironment(
     requireTls: parseBoolean(environment.SMTP_REQUIRE_TLS, !secure),
     username: environment.SMTP_USER?.trim(),
     password: environment.SMTP_PASSWORD,
+  });
+}
+
+export function createPasswordResetMailerFromConfig(
+  config: SmtpMailerConfig,
+): PasswordResetMailer {
+  return new SmtpPasswordResetMailer(config.from, {
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    requireTls: config.requireTls,
+    username: config.user,
+    password: config.pass,
   });
 }
 

@@ -14,6 +14,7 @@ import type {
   PasswordResetConfirmResult,
   PasswordResetRequestResult,
   PublicAccount,
+  RegistrationEmailVerificationConfirmResult,
 } from "@gupiaomoniqi/shared";
 import { GAME_RULES } from "../config.js";
 import type {
@@ -21,6 +22,7 @@ import type {
   EmailVerificationChallengeRecord,
   GameRepository,
   PasswordResetChallengeRecord,
+  RegistrationEmailChallengeRecord,
 } from "../repositories/GameRepository.js";
 import type { PasswordResetMailer } from "./PasswordResetMailer.js";
 
@@ -51,6 +53,7 @@ export class AuthService {
     email: string;
     password: string;
     displayName: string;
+    emailVerificationToken?: string;
   }): Promise<AuthResult> {
     const username = input.username.trim();
     const usernameNormalized = normalizeUsername(username);
@@ -65,6 +68,13 @@ export class AuthService {
     }
 
     const now = this.clock();
+    const registrationVerification = input.emailVerificationToken
+      ? this.#requireRegistrationEmailVerification(
+          emailNormalized,
+          input.emailVerificationToken,
+          now,
+        )
+      : undefined;
     const account: AccountRecord = {
       id: randomUUID(),
       username,
@@ -79,17 +89,26 @@ export class AuthService {
     };
 
     try {
-      await this.repository.createAccount({
-        account,
-        portfolio: {
-          id: randomUUID(),
-          accountId: account.id,
-          mode: "VIRTUAL",
-          initialCashUsd: GAME_RULES.initialCashUsd,
-          availableCashUsd: GAME_RULES.initialCashUsd,
-          frozenCashUsd: 0,
+      await this.repository.createAccount(
+        {
+          account,
+          portfolio: {
+            id: randomUUID(),
+            accountId: account.id,
+            mode: "VIRTUAL",
+            initialCashUsd: GAME_RULES.initialCashUsd,
+            availableCashUsd: GAME_RULES.initialCashUsd,
+            frozenCashUsd: 0,
+          },
         },
-      });
+        registrationVerification
+          ? {
+              challengeId: registrationVerification.id,
+              emailNormalized,
+              consumedAt: now.toISOString(),
+            }
+          : undefined,
+      );
     } catch (error) {
       if (
         error instanceof Error &&
@@ -103,6 +122,12 @@ export class AuthService {
       }
       if (error instanceof Error && error.message === "EMAIL_EXISTS") {
         throw new AuthError("EMAIL_EXISTS", "这个邮箱已经被注册", 409);
+      }
+      if (
+        error instanceof Error &&
+        error.message === "REGISTRATION_EMAIL_NOT_VERIFIED"
+      ) {
+        throw registrationEmailVerificationRequired();
       }
       throw error;
     }
@@ -314,6 +339,107 @@ export class AuthService {
     };
   }
 
+  async requestRegistrationEmailVerification(input: {
+    email: string;
+  }): Promise<EmailVerificationRequestResult> {
+    if (!this.passwordResetMailer) {
+      throw new AuthError(
+        "EMAIL_VERIFICATION_UNAVAILABLE",
+        "邮件发送尚未配置，暂时无法注册新账户",
+        503,
+      );
+    }
+
+    const email = input.email.trim();
+    const emailNormalized = normalizeEmail(email);
+    if (this.repository.getAccountByEmail(emailNormalized)) {
+      throw new AuthError("EMAIL_EXISTS", "这个邮箱已经被注册", 409);
+    }
+
+    const now = this.clock();
+    const code = createSixDigitCode();
+    const challenge: RegistrationEmailChallengeRecord = {
+      id: randomUUID(),
+      email,
+      emailNormalized,
+      codeHash: await hashPassword(code),
+      expiresAt: new Date(now.getTime() + PASSWORD_RESET_TTL_MS).toISOString(),
+      attemptsRemaining: PASSWORD_RESET_ATTEMPTS,
+      verifiedAt: null,
+      consumedAt: null,
+      createdAt: now.toISOString(),
+    };
+    await this.repository.replaceRegistrationEmailChallenge(challenge);
+
+    try {
+      await this.passwordResetMailer.sendRegistrationEmailVerificationCode({
+        to: email,
+        code,
+        expiresInMinutes: PASSWORD_RESET_TTL_MS / 60_000,
+      });
+    } catch {
+      challenge.consumedAt = this.clock().toISOString();
+      await this.repository.updateRegistrationEmailChallenge(challenge);
+      throw new AuthError(
+        "EMAIL_VERIFICATION_DELIVERY_FAILED",
+        "验证码邮件发送失败，请稍后再试",
+        503,
+      );
+    }
+
+    return {
+      accepted: true,
+      expiresInSeconds: PASSWORD_RESET_TTL_MS / 1_000,
+    };
+  }
+
+  async confirmRegistrationEmailVerification(input: {
+    email: string;
+    code: string;
+  }): Promise<RegistrationEmailVerificationConfirmResult> {
+    const emailNormalized = normalizeEmail(input.email);
+    const challenge =
+      this.repository.getRegistrationEmailChallenge(emailNormalized);
+    const now = this.clock();
+    if (
+      !challenge ||
+      challenge.consumedAt ||
+      challenge.attemptsRemaining <= 0 ||
+      new Date(challenge.expiresAt).getTime() <= now.getTime()
+    ) {
+      throw invalidRegistrationEmailCode();
+    }
+
+    if (!(await verifyPassword(input.code, challenge.codeHash))) {
+      await this.repository.recordRegistrationEmailFailure(
+        emailNormalized,
+        challenge.id,
+        now.toISOString(),
+      );
+      throw invalidRegistrationEmailCode();
+    }
+
+    if (
+      !(await this.repository.verifyRegistrationEmailChallenge(
+        emailNormalized,
+        challenge.id,
+        now.toISOString(),
+      ))
+    ) {
+      throw invalidRegistrationEmailCode();
+    }
+
+    return {
+      verificationToken: challenge.id,
+      expiresInSeconds: Math.max(
+        1,
+        Math.ceil(
+          (new Date(challenge.expiresAt).getTime() - now.getTime()) / 1_000,
+        ),
+      ),
+    };
+  }
+
   async confirmEmailVerification(
     accountId: string,
     input: { email: string; code: string },
@@ -442,6 +568,25 @@ export class AuthService {
       account: toPublicAccount(account),
     };
   }
+
+  #requireRegistrationEmailVerification(
+    emailNormalized: string,
+    verificationToken: string,
+    now: Date,
+  ): RegistrationEmailChallengeRecord {
+    const challenge =
+      this.repository.getRegistrationEmailChallenge(emailNormalized);
+    if (
+      !challenge ||
+      challenge.id !== verificationToken ||
+      !challenge.verifiedAt ||
+      challenge.consumedAt ||
+      new Date(challenge.expiresAt).getTime() <= now.getTime()
+    ) {
+      throw registrationEmailVerificationRequired();
+    }
+    return challenge;
+  }
 }
 
 export function toPublicAccount(account: AccountRecord): PublicAccount {
@@ -457,6 +602,22 @@ export function toPublicAccount(account: AccountRecord): PublicAccount {
 
 function normalizeUsername(username: string): string {
   return username.trim().toLowerCase();
+}
+
+function invalidRegistrationEmailCode(): AuthError {
+  return new AuthError(
+    "INVALID_EMAIL_VERIFICATION_CODE",
+    "验证码无效、已过期或尝试次数已用完",
+    400,
+  );
+}
+
+function registrationEmailVerificationRequired(): AuthError {
+  return new AuthError(
+    "EMAIL_VERIFICATION_REQUIRED",
+    "请先完成注册邮箱验证码校验",
+    400,
+  );
 }
 
 function normalizeEmail(email: string): string {

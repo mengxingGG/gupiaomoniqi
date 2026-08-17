@@ -21,6 +21,7 @@ import type {
   PortfolioSnapshot,
   PublicAccount,
   RealMarketStatus,
+  RegistrationEmailVerificationConfirmResult,
   RewardClaimResult,
   StockMarket,
   TradeRequest,
@@ -80,6 +81,7 @@ export function storeAuth(auth: StoredAuth | null): void {
 export function register(input: {
   username: string;
   email: string;
+  emailVerificationToken: string;
   password: string;
   displayName: string;
 }): Promise<AuthResult> {
@@ -268,6 +270,33 @@ export function confirmEmailVerification(input: {
       method: "POST",
       body: JSON.stringify(input),
     },
+  );
+}
+
+export function requestRegistrationEmailVerification(
+  email: string,
+): Promise<EmailVerificationRequestResult> {
+  return request<EmailVerificationRequestResult>(
+    "/api/account/email-verification/request",
+    {
+      method: "POST",
+      body: JSON.stringify({ email, purpose: "REGISTRATION" }),
+    },
+    false,
+  );
+}
+
+export function confirmRegistrationEmailVerification(input: {
+  email: string;
+  code: string;
+}): Promise<RegistrationEmailVerificationConfirmResult> {
+  return request<RegistrationEmailVerificationConfirmResult>(
+    "/api/account/email-verification/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify({ ...input, purpose: "REGISTRATION" }),
+    },
+    false,
   );
 }
 

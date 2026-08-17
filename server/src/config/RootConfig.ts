@@ -48,9 +48,32 @@ const llmTradingSchema = z
   })
   .strict();
 
+const smtpSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    host: z.string().trim().min(1).max(253),
+    port: z.coerce.number().int().min(1).max(65_535).default(465),
+    secure: z.boolean().default(true),
+    requireTls: z.boolean().optional(),
+    user: z.string().trim().min(1).max(320).optional(),
+    pass: z.string().min(1).max(1_000).optional(),
+    from: z.string().trim().min(3).max(320),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.user === undefined) !== (value.pass === undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: [value.user === undefined ? "user" : "pass"],
+        message: "smtp.user 与 smtp.pass 必须同时配置",
+      });
+    }
+  });
+
 const rootConfigSchema = z
   .object({
     llmTrading: z.unknown().optional(),
+    smtp: z.unknown().optional(),
   })
   .passthrough();
 
@@ -70,6 +93,17 @@ export interface LLMTradingConfig {
   circuitMaximumBackoffMs: number;
 }
 
+export interface SmtpConfig {
+  enabled: true;
+  host: string;
+  port: number;
+  secure: boolean;
+  requireTls: boolean;
+  user?: string;
+  pass?: string;
+  from: string;
+}
+
 export type RootConfigState = "ENABLED" | "DISABLED" | "MISSING" | "INVALID";
 
 export interface RootConfigResult {
@@ -77,6 +111,9 @@ export interface RootConfigResult {
   state: RootConfigState;
   llmTrading: LLMTradingConfig | null;
   error: string | null;
+  smtpState: RootConfigState;
+  smtp: SmtpConfig | null;
+  smtpError: string | null;
 }
 
 export interface LoadRootConfigOptions {
@@ -87,9 +124,7 @@ export interface LoadRootConfigOptions {
 export async function loadRootConfig(
   options: LoadRootConfigOptions = {},
 ): Promise<RootConfigResult> {
-  const path = resolve(
-    options.path ?? process.env.APP_CONFIG_PATH ?? resolve(process.cwd(), "config.json"),
-  );
+  const path = resolveRootConfigPath(options.path);
   const readText = options.readText ?? ((candidate: string) => readFile(candidate, "utf8"));
   let source: string;
 
@@ -107,7 +142,7 @@ export async function loadRootConfig(
 
 export function parseRootConfig(
   source: string,
-  path = resolve(process.cwd(), "config.json"),
+  path = resolveRootConfigPath(),
 ): RootConfigResult {
   let parsedJson: unknown;
 
@@ -121,56 +156,59 @@ export function parseRootConfig(
   if (!root.success) {
     return disabledResult(path, "INVALID", formatZodError(root.error));
   }
-  if (root.data.llmTrading === undefined || root.data.llmTrading === null) {
-    return disabledResult(path, "DISABLED", null);
+
+  return {
+    path,
+    ...parseLlmTrading(root.data.llmTrading),
+    ...parseSmtp(root.data.smtp),
+  };
+}
+
+export function resolveRootConfigPath(path?: string): string {
+  return resolve(
+    path ??
+      process.env.APP_CONFIG_PATH ??
+      resolve(process.cwd(), "config.json"),
+  );
+}
+
+function parseLlmTrading(value: unknown): Pick<
+  RootConfigResult,
+  "state" | "llmTrading" | "error"
+> {
+  if (value === undefined || value === null || isExplicitlyDisabled(value)) {
+    return { state: "DISABLED", llmTrading: null, error: null };
   }
 
-  if (
-    typeof root.data.llmTrading === "object" &&
-    root.data.llmTrading !== null &&
-    "enabled" in root.data.llmTrading &&
-    (root.data.llmTrading as { enabled?: unknown }).enabled === false
-  ) {
-    return disabledResult(path, "DISABLED", null);
-  }
-
-  const llm = llmTradingSchema.safeParse(root.data.llmTrading);
+  const llm = llmTradingSchema.safeParse(value);
   if (!llm.success) {
-    return disabledResult(path, "INVALID", formatZodError(llm.error));
-  }
-  if (!llm.data.enabled) {
-    return disabledResult(path, "DISABLED", null);
+    return {
+      state: "INVALID",
+      llmTrading: null,
+      error: formatZodError(llm.error),
+    };
   }
 
   const endpoint = new URL(llm.data.baseUrl);
   const protocol = endpoint.protocol;
   if (protocol !== "http:" && protocol !== "https:") {
-    return disabledResult(path, "INVALID", "llmTrading.baseUrl 只支持 http 或 https");
+    return invalidLlm("llmTrading.baseUrl 只支持 http 或 https");
   }
   if (endpoint.username || endpoint.password) {
-    return disabledResult(
-      path,
-      "INVALID",
-      "llmTrading.baseUrl 不允许包含用户名或密码",
-    );
+    return invalidLlm("llmTrading.baseUrl 不允许包含用户名或密码");
   }
   if (protocol === "http:" && !isPrivateHost(endpoint.hostname)) {
-    return disabledResult(
-      path,
-      "INVALID",
+    return invalidLlm(
       "公网 LLM 地址必须使用 https；http 仅允许本机或局域网地址",
     );
   }
   if (llm.data.circuitMaximumBackoffMs < llm.data.circuitBackoffMs) {
-    return disabledResult(
-      path,
-      "INVALID",
+    return invalidLlm(
       "llmTrading.circuitMaximumBackoffMs 不能小于 circuitBackoffMs",
     );
   }
 
   return {
-    path,
     state: "ENABLED",
     llmTrading: {
       ...llm.data,
@@ -182,12 +220,63 @@ export function parseRootConfig(
   };
 }
 
+function parseSmtp(value: unknown): Pick<
+  RootConfigResult,
+  "smtpState" | "smtp" | "smtpError"
+> {
+  if (value === undefined || value === null || isExplicitlyDisabled(value)) {
+    return { smtpState: "DISABLED", smtp: null, smtpError: null };
+  }
+
+  const smtp = smtpSchema.safeParse(value);
+  if (!smtp.success) {
+    return {
+      smtpState: "INVALID",
+      smtp: null,
+      smtpError: formatZodError(smtp.error),
+    };
+  }
+
+  return {
+    smtpState: "ENABLED",
+    smtp: {
+      ...smtp.data,
+      enabled: true,
+      requireTls: smtp.data.requireTls ?? !smtp.data.secure,
+    },
+    smtpError: null,
+  };
+}
+
+function isExplicitlyDisabled(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "enabled" in value &&
+    (value as { enabled?: unknown }).enabled === false
+  );
+}
+
+function invalidLlm(
+  error: string,
+): Pick<RootConfigResult, "state" | "llmTrading" | "error"> {
+  return { state: "INVALID", llmTrading: null, error };
+}
+
 function disabledResult(
   path: string,
   state: Exclude<RootConfigState, "ENABLED">,
   error: string | null,
 ): RootConfigResult {
-  return { path, state, llmTrading: null, error };
+  return {
+    path,
+    state,
+    llmTrading: null,
+    error,
+    smtpState: state,
+    smtp: null,
+    smtpError: error,
+  };
 }
 
 function isMissingFile(error: unknown): boolean {

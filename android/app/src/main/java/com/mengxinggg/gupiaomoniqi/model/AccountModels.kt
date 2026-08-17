@@ -28,6 +28,11 @@ data class EmailVerificationRequestResult(
     val expiresInSeconds: Int,
 )
 
+data class RegistrationEmailVerificationConfirmResult(
+    val verificationToken: String,
+    val expiresInSeconds: Int,
+)
+
 data class Position(
     val instrumentId: String,
     val symbol: String,

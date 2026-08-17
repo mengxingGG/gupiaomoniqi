@@ -32,6 +32,7 @@ import com.mengxinggg.gupiaomoniqi.model.Quote
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimResult
 import com.mengxinggg.gupiaomoniqi.model.RewardClaimState
 import com.mengxinggg.gupiaomoniqi.model.RewardKind
+import com.mengxinggg.gupiaomoniqi.model.RegistrationEmailVerificationConfirmResult
 import com.mengxinggg.gupiaomoniqi.model.SettlementCycle
 import com.mengxinggg.gupiaomoniqi.model.TradeActorType
 import com.mengxinggg.gupiaomoniqi.model.TradeResult
@@ -96,6 +97,14 @@ object JsonCodec {
     fun emailVerificationRequest(json: JSONObject): EmailVerificationRequestResult =
         EmailVerificationRequestResult(
             accepted = json.getBoolean("accepted"),
+            expiresInSeconds = json.getInt("expiresInSeconds"),
+        )
+
+    fun registrationEmailVerificationConfirm(
+        json: JSONObject,
+    ): RegistrationEmailVerificationConfirmResult =
+        RegistrationEmailVerificationConfirmResult(
+            verificationToken = json.getString("verificationToken"),
             expiresInSeconds = json.getInt("expiresInSeconds"),
         )
 

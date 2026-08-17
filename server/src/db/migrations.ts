@@ -673,6 +673,25 @@ const LEGACY_ACCOUNT_EMAIL_VERIFICATION_MIGRATION = [
     ON email_verification_challenges (expires_at)`,
 ];
 
+const REGISTRATION_EMAIL_VERIFICATION_MIGRATION = [
+  `CREATE TABLE IF NOT EXISTS registration_email_challenges (
+    id uuid PRIMARY KEY,
+    email text NOT NULL,
+    email_normalized text NOT NULL,
+    code_hash text NOT NULL,
+    expires_at timestamptz NOT NULL,
+    attempts_remaining integer NOT NULL DEFAULT 5
+      CHECK (attempts_remaining >= 0),
+    verified_at timestamptz,
+    consumed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS registration_email_created_index
+    ON registration_email_challenges (email_normalized, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS registration_email_expiry_index
+    ON registration_email_challenges (expires_at)`,
+];
+
 export async function migrateDatabase(client: PGlite): Promise<void> {
   await client.exec(INITIAL_SCHEMA);
   for (const statement of ACCOUNT_LEDGER_MIGRATION) {
@@ -705,6 +724,11 @@ export async function migrateDatabase(client: PGlite): Promise<void> {
     client,
     13,
     LEGACY_ACCOUNT_EMAIL_VERIFICATION_MIGRATION,
+  );
+  await runVersionedMigration(
+    client,
+    14,
+    REGISTRATION_EMAIL_VERIFICATION_MIGRATION,
   );
   await client.query(
     `INSERT INTO schema_migrations (version)

@@ -474,6 +474,42 @@ export const emailVerificationChallenges = pgTable(
   ],
 );
 
+export const registrationEmailChallenges = pgTable(
+  "registration_email_challenges",
+  {
+    id: uuid("id").primaryKey(),
+    email: text("email").notNull(),
+    emailNormalized: text("email_normalized").notNull(),
+    codeHash: text("code_hash").notNull(),
+    expiresAt: timestamp("expires_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    attemptsRemaining: integer("attempts_remaining").notNull().default(5),
+    verifiedAt: timestamp("verified_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    consumedAt: timestamp("consumed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("registration_email_created_index").on(
+      table.emailNormalized,
+      table.createdAt,
+    ),
+    index("registration_email_expiry_index").on(table.expiresAt),
+  ],
+);
+
 export const aiTraderDecisions = pgTable(
   "ai_trader_decisions",
   {

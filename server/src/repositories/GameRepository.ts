@@ -101,6 +101,24 @@ export interface EmailVerificationChallengeRecord {
   createdAt: string;
 }
 
+export interface RegistrationEmailChallengeRecord {
+  id: string;
+  email: string;
+  emailNormalized: string;
+  codeHash: string;
+  expiresAt: string;
+  attemptsRemaining: number;
+  verifiedAt: string | null;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
+export interface RegistrationEmailVerificationCommit {
+  challengeId: string;
+  emailNormalized: string;
+  consumedAt: string;
+}
+
 export interface OrderRecord extends LimitOrder {
   mode: "VIRTUAL";
   portfolioId: string;
@@ -194,7 +212,10 @@ export interface GameRepository {
   ): CandleRecord | undefined;
   upsertCandles(candles: CandleRecord[]): Promise<void>;
 
-  createAccount(commit: CreateAccountCommit): Promise<void>;
+  createAccount(
+    commit: CreateAccountCommit,
+    registrationVerification?: RegistrationEmailVerificationCommit,
+  ): Promise<void>;
   getAccountById(accountId: string): AccountRecord | undefined;
   getAccountByUsername(usernameNormalized: string): AccountRecord | undefined;
   getAccountByEmail(emailNormalized: string): AccountRecord | undefined;
@@ -248,6 +269,26 @@ export interface GameRepository {
     challengeId: string,
     at: string,
   ): Promise<number>;
+
+  replaceRegistrationEmailChallenge(
+    challenge: RegistrationEmailChallengeRecord,
+  ): Promise<void>;
+  getRegistrationEmailChallenge(
+    emailNormalized: string,
+  ): RegistrationEmailChallengeRecord | undefined;
+  updateRegistrationEmailChallenge(
+    challenge: RegistrationEmailChallengeRecord,
+  ): Promise<void>;
+  recordRegistrationEmailFailure(
+    emailNormalized: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number>;
+  verifyRegistrationEmailChallenge(
+    emailNormalized: string,
+    challengeId: string,
+    at: string,
+  ): Promise<boolean>;
 
   getPortfolioByAccountId(accountId: string): PortfolioRecord | undefined;
   getPortfolioById(portfolioId: string): PortfolioRecord | undefined;

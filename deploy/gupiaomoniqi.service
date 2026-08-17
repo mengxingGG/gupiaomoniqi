@@ -16,6 +16,7 @@ Environment=PORT=3100
 Environment=DATABASE_DIR=/var/lib/gupiaomoniqi/pgdata
 Environment=REAL_DATABASE_DIR=/var/lib/gupiaomoniqi/real-pgdata
 Environment=MARKET_SEED_PATH=/var/lib/gupiaomoniqi/market-seeds.json
+Environment=APP_CONFIG_PATH=/var/lib/gupiaomoniqi/config.json
 Environment=REAL_MARKET_SYNC_ENABLED=true
 Environment=NODE_OPTIONS=--max-old-space-size=4096
 EnvironmentFile=-/etc/gupiaomoniqi.env

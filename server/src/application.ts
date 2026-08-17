@@ -33,6 +33,7 @@ import type {
   PublicAccount,
   Quote,
   RealMarketStatus,
+  RegistrationEmailVerificationConfirmResult,
   RewardClaimResult,
   StockMarket,
   TradeRequest,
@@ -61,7 +62,10 @@ import {
   REAL_MARKET_CONFIG,
   SECURITY_CONFIG,
 } from "./config.js";
-import { loadRootConfig } from "./config/RootConfig.js";
+import {
+  loadRootConfig,
+  resolveRootConfigPath,
+} from "./config/RootConfig.js";
 import type { DatabaseConnection } from "./db/client.js";
 import { openDatabase } from "./db/client.js";
 import { migrateDatabase } from "./db/migrations.js";
@@ -101,6 +105,7 @@ import {
 } from "./services/AccountFeatureStore.js";
 import { RewardService } from "./services/RewardService.js";
 import {
+  createPasswordResetMailerFromConfig,
   createPasswordResetMailerFromEnvironment,
   type PasswordResetMailer,
 } from "./services/PasswordResetMailer.js";
@@ -168,6 +173,7 @@ const registerSchema = z.object({
     .max(20, "用户名最多 20 位")
     .regex(/^[A-Za-z0-9_]+$/, "用户名只能包含字母、数字和下划线"),
   email: z.string().trim().email("请输入有效邮箱").max(254),
+  emailVerificationToken: z.string().uuid("邮箱验证凭证无效").optional(),
   password: strongPasswordSchema,
   displayName: z
     .string()
@@ -214,11 +220,17 @@ const passwordResetConfirmSchema = z.object({
 
 const emailVerificationRequestSchema = z.object({
   email: z.string().trim().email("请输入有效邮箱").max(254),
+  purpose: z
+    .enum(["ACCOUNT_BINDING", "REGISTRATION"])
+    .default("ACCOUNT_BINDING"),
 });
 
 const emailVerificationConfirmSchema = z.object({
   email: z.string().trim().email("请输入有效邮箱").max(254),
   code: z.string().regex(/^\d{6}$/, "请输入 6 位数字验证码"),
+  purpose: z
+    .enum(["ACCOUNT_BINDING", "REGISTRATION"])
+    .default("ACCOUNT_BINDING"),
 });
 
 const industryDirectorySchema = z.object({
@@ -299,6 +311,7 @@ export interface CreateApplicationOptions {
   rootConfigPath?: string;
   llmFetchImplementation?: typeof fetch;
   passwordResetMailer?: PasswordResetMailer | null;
+  registrationEmailVerificationRequired?: boolean;
 }
 
 export async function createApplication(
@@ -318,9 +331,13 @@ export async function createApplication(
   let repository = options.repository;
   let primaryConnection = options.databaseConnection;
   const clock = options.clock ?? (() => new Date());
-  const rootConfig = await loadRootConfig({ path: options.rootConfigPath });
+  const rootConfigPath = resolveRootConfigPath(options.rootConfigPath);
+  const rootConfig = await loadRootConfig({ path: rootConfigPath });
   if (rootConfig.state === "INVALID") {
     console.warn(`LLM 智能交易配置无效，已安全停用：${rootConfig.error}`);
+  }
+  if (rootConfig.smtpState === "INVALID") {
+    console.warn(`SMTP 配置无效，邮件发送已安全停用：${rootConfig.smtpError}`);
   }
 
   if (!repository) {
@@ -452,13 +469,19 @@ export async function createApplication(
   );
   const passwordResetMailer =
     options.passwordResetMailer === undefined
-      ? createPasswordResetMailerFromEnvironment()
+      ? createPasswordResetMailerFromEnvironment() ??
+        (rootConfig.smtp
+          ? createPasswordResetMailerFromConfig(rootConfig.smtp)
+          : null)
       : options.passwordResetMailer;
   const authService = new AuthService(
     repository,
     clock,
     passwordResetMailer,
   );
+  const registrationEmailVerificationRequired =
+    options.registrationEmailVerificationRequired ??
+    (process.env.NODE_ENV === "production" || passwordResetMailer !== null);
   const marketDetailService = new MarketDetailService(
     repository,
     engine,
@@ -685,6 +708,8 @@ export async function createApplication(
       emailDelivery: {
         configured: passwordResetMailer !== null,
         mode: "SMTP_SEND_ONLY",
+        registrationVerificationRequired:
+          registrationEmailVerificationRequired,
       },
       serverTime: new Date().toISOString(),
     },
@@ -708,6 +733,15 @@ export async function createApplication(
         code: "INVALID_REGISTRATION",
         message:
           parsed.error.issues[0]?.message ?? "注册信息格式无效",
+      });
+    }
+    if (
+      registrationEmailVerificationRequired &&
+      !parsed.data.emailVerificationToken
+    ) {
+      return reply.status(400).send({
+        code: "EMAIL_VERIFICATION_REQUIRED",
+        message: "请先完成注册邮箱验证码校验",
       });
     }
 
@@ -833,10 +867,6 @@ export async function createApplication(
     Body: z.infer<typeof emailVerificationRequestSchema>;
     Reply: ApiEnvelope<EmailVerificationRequestResult> | ApiError;
   }>("/api/account/email-verification/request", async (request, reply) => {
-    const account = requireAccount(request, authService);
-    if (!account) {
-      return unauthorized(reply);
-    }
     const parsed = emailVerificationRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -845,6 +875,40 @@ export async function createApplication(
       });
     }
     const emailKey = parsed.data.email.toLowerCase();
+    if (parsed.data.purpose === "REGISTRATION") {
+      if (
+        !authLimiter.allow("registration-email-global", 60, 60_000) ||
+        !authLimiter.allow(
+          `registration-email:${emailKey}`,
+          3,
+          15 * 60_000,
+        ) ||
+        !authLimiter.allow(
+          `registration-email-ip:${request.ip}`,
+          8,
+          15 * 60_000,
+        )
+      ) {
+        return reply.status(429).send({
+          code: "RATE_LIMITED",
+          message: "验证码请求过于频繁，请稍后再试",
+        });
+      }
+      try {
+        return reply.status(202).send({
+          data: await authService.requestRegistrationEmailVerification(
+            parsed.data,
+          ),
+        });
+      } catch (error) {
+        return sendAuthError(error, reply);
+      }
+    }
+
+    const account = requireAccount(request, authService);
+    if (!account) {
+      return unauthorized(reply);
+    }
     if (
       !authLimiter.allow("email-verification-global", 60, 60_000) ||
       !authLimiter.allow(
@@ -883,8 +947,43 @@ export async function createApplication(
 
   app.post<{
     Body: z.infer<typeof emailVerificationConfirmSchema>;
-    Reply: ApiEnvelope<PublicAccount> | ApiError;
+    Reply:
+      | ApiEnvelope<PublicAccount>
+      | ApiEnvelope<RegistrationEmailVerificationConfirmResult>
+      | ApiError;
   }>("/api/account/email-verification/confirm", async (request, reply) => {
+    const parsed = emailVerificationConfirmSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_EMAIL_VERIFICATION_CONFIRMATION",
+        message: parsed.error.issues[0]?.message ?? "验证码格式无效",
+      });
+    }
+
+    if (parsed.data.purpose === "REGISTRATION") {
+      if (
+        !authLimiter.allow(
+          `registration-email-confirm:${parsed.data.email.toLowerCase()}:${request.ip}`,
+          10,
+          15 * 60_000,
+        )
+      ) {
+        return reply.status(429).send({
+          code: "RATE_LIMITED",
+          message: "验证码尝试过于频繁，请稍后再试",
+        });
+      }
+      try {
+        return {
+          data: await authService.confirmRegistrationEmailVerification(
+            parsed.data,
+          ),
+        };
+      } catch (error) {
+        return sendAuthError(error, reply);
+      }
+    }
+
     const account = requireAccount(request, authService);
     if (!account) {
       return unauthorized(reply);
@@ -899,13 +998,6 @@ export async function createApplication(
       return reply.status(429).send({
         code: "RATE_LIMITED",
         message: "验证码尝试过于频繁，请稍后再试",
-      });
-    }
-    const parsed = emailVerificationConfirmSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        code: "INVALID_EMAIL_VERIFICATION_CONFIRMATION",
-        message: parsed.error.issues[0]?.message ?? "验证码格式无效",
       });
     }
 

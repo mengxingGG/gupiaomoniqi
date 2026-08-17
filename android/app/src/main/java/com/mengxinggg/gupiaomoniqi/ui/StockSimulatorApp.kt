@@ -176,6 +176,8 @@ fun StockSimulatorApp() {
                         onBack = viewModel::closeAuth,
                         onModeChange = viewModel::changeAuthMode,
                         onSubmit = viewModel::authenticate,
+                        onRegistrationEmailReset =
+                            viewModel::resetRegistrationEmailVerification,
                         onResetRequest = viewModel::requestPasswordReset,
                         onResetConfirm = viewModel::confirmPasswordReset,
                         modifier = Modifier

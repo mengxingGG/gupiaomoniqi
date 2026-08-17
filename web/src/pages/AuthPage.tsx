@@ -1,9 +1,11 @@
 import type { AuthResult } from "@gupiaomoniqi/shared";
 import { type FormEvent, useState } from "react";
 import {
+  confirmRegistrationEmailVerification,
   confirmPasswordReset,
   login,
   register,
+  requestRegistrationEmailVerification,
   requestPasswordReset,
 } from "../api";
 
@@ -25,6 +27,8 @@ export function AuthPage({
   const [password, setPassword] = useState("");
   const [resetCode, setResetCode] = useState("");
   const [resetCodeSent, setResetCodeSent] = useState(false);
+  const [registrationCode, setRegistrationCode] = useState("");
+  const [registrationCodeSent, setRegistrationCodeSent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -36,6 +40,10 @@ export function AuthPage({
     if (nextMode !== "forgot") {
       setResetCodeSent(false);
       setResetCode("");
+    }
+    if (nextMode !== "register") {
+      setRegistrationCodeSent(false);
+      setRegistrationCode("");
     }
   }
 
@@ -67,15 +75,29 @@ export function AuthPage({
         return;
       }
 
-      const result =
-        mode === "register"
-          ? await register({
+      if (mode === "register" && !registrationCodeSent) {
+        await requestRegistrationEmailVerification(email.trim());
+        setRegistrationCodeSent(true);
+        setNotice("六位验证码已经发送到该邮箱，有效期 10 分钟。");
+        return;
+      }
+
+      const result = mode === "register"
+        ? await (async () => {
+            const confirmation =
+              await confirmRegistrationEmailVerification({
+                email: email.trim(),
+                code: registrationCode,
+              });
+            return register({
               username,
-              email,
+              email: email.trim(),
               displayName,
               password,
-            })
-          : await login({ username, password });
+              emailVerificationToken: confirmation.verificationToken,
+            });
+          })()
+        : await login({ username, password });
       onAuthenticated(result);
     } catch (nextError) {
       setError(
@@ -175,7 +197,10 @@ export function AuthPage({
                 <span>邮箱</span>
                 <input
                   autoComplete="email"
-                  disabled={isForgot && resetCodeSent}
+                  disabled={
+                    (isForgot && resetCodeSent) ||
+                    (isRegister && registrationCodeSent)
+                  }
                   maxLength={254}
                   placeholder="name@example.com"
                   required
@@ -221,6 +246,27 @@ export function AuthPage({
               </label>
             ) : null}
 
+            {isRegister && registrationCodeSent ? (
+              <label>
+                <span>注册邮箱六位验证码</span>
+                <input
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  maxLength={6}
+                  minLength={6}
+                  pattern="[0-9]{6}"
+                  placeholder="000000"
+                  required
+                  value={registrationCode}
+                  onChange={(event) =>
+                    setRegistrationCode(
+                      event.target.value.replace(/\D/g, "").slice(0, 6),
+                    )
+                  }
+                />
+              </label>
+            ) : null}
+
             {!isForgot || resetCodeSent ? (
               <label>
                 <span>{isForgot ? "新密码" : "密码"}</span>
@@ -257,6 +303,21 @@ export function AuthPage({
               </button>
             ) : null}
 
+            {isRegister && registrationCodeSent ? (
+              <button
+                className="auth-text-action"
+                type="button"
+                onClick={() => {
+                  setRegistrationCodeSent(false);
+                  setRegistrationCode("");
+                  setNotice(null);
+                  setError(null);
+                }}
+              >
+                ← 更换注册邮箱
+              </button>
+            ) : null}
+
             {isForgot ? (
               <button
                 className="auth-text-action"
@@ -286,7 +347,9 @@ export function AuthPage({
                     ? "验证并设置新密码"
                     : "发送六位验证码"
                   : isRegister
-                    ? "注册并领取模拟资金"
+                    ? registrationCodeSent
+                      ? "验证邮箱并注册"
+                      : "发送注册验证码"
                     : "登录账户"}
             </button>
           </form>

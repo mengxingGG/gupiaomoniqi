@@ -17,6 +17,8 @@ import { randomUUID } from "node:crypto";
 import {
   and,
   eq,
+  gt,
+  isNotNull,
   isNull,
   sql,
 } from "drizzle-orm";
@@ -33,6 +35,7 @@ import {
   portfolios,
   positions,
   quotes,
+  registrationEmailChallenges,
   sessions,
   transactions as transactionTable,
 } from "../db/schema.js";
@@ -51,6 +54,8 @@ import type {
   PasswordResetChallengeRecord,
   PortfolioRecord,
   PositionRecord,
+  RegistrationEmailChallengeRecord,
+  RegistrationEmailVerificationCommit,
   SessionRecord,
   SettlementResult,
   TradeCommit,
@@ -99,6 +104,10 @@ export class DatabaseGameRepository implements GameRepository {
   readonly #emailVerificationChallenges = new Map<
     string,
     EmailVerificationChallengeRecord
+  >();
+  readonly #registrationEmailChallenges = new Map<
+    string,
+    RegistrationEmailChallengeRecord
   >();
   readonly #portfolios = new Map<string, PortfolioRecord>();
   readonly #portfolioIdsByAccount = new Map<string, string>();
@@ -295,7 +304,10 @@ export class DatabaseGameRepository implements GameRepository {
     }
   }
 
-  async createAccount(commit: CreateAccountCommit): Promise<void> {
+  async createAccount(
+    commit: CreateAccountCommit,
+    registrationVerification?: RegistrationEmailVerificationCommit,
+  ): Promise<void> {
     if (
       this.#accountIdsByUsername.has(commit.account.usernameNormalized)
     ) {
@@ -310,6 +322,35 @@ export class DatabaseGameRepository implements GameRepository {
 
     try {
       await this.connection.db.transaction(async (transaction) => {
+        if (registrationVerification) {
+          const consumed = await transaction
+            .update(registrationEmailChallenges)
+            .set({
+              consumedAt: new Date(registrationVerification.consumedAt),
+            })
+            .where(
+              and(
+                eq(
+                  registrationEmailChallenges.id,
+                  registrationVerification.challengeId,
+                ),
+                eq(
+                  registrationEmailChallenges.emailNormalized,
+                  registrationVerification.emailNormalized,
+                ),
+                isNotNull(registrationEmailChallenges.verifiedAt),
+                isNull(registrationEmailChallenges.consumedAt),
+                gt(
+                  registrationEmailChallenges.expiresAt,
+                  new Date(registrationVerification.consumedAt),
+                ),
+              ),
+            )
+            .returning({ id: registrationEmailChallenges.id });
+          if (consumed.length === 0) {
+            throw new Error("REGISTRATION_EMAIL_NOT_VERIFIED");
+          }
+        }
         await transaction.insert(accounts).values({
           id: commit.account.id,
           username: commit.account.username,
@@ -367,6 +408,14 @@ export class DatabaseGameRepository implements GameRepository {
     );
     this.#positions.set(commit.portfolio.id, new Map());
     this.#transactions.set(commit.portfolio.id, []);
+    if (registrationVerification) {
+      const challenge = this.#registrationEmailChallenges.get(
+        registrationVerification.emailNormalized,
+      );
+      if (challenge?.id === registrationVerification.challengeId) {
+        challenge.consumedAt = registrationVerification.consumedAt;
+      }
+    }
   }
 
   getAccountById(accountId: string): AccountRecord | undefined {
@@ -726,6 +775,128 @@ export class DatabaseGameRepository implements GameRepository {
         : null;
     }
     return row?.attempts_remaining ?? 0;
+  }
+
+  async replaceRegistrationEmailChallenge(
+    challenge: RegistrationEmailChallengeRecord,
+  ): Promise<void> {
+    await this.connection.db.transaction(async (transaction) => {
+      await transaction
+        .update(registrationEmailChallenges)
+        .set({ consumedAt: new Date(challenge.createdAt) })
+        .where(
+          and(
+            eq(
+              registrationEmailChallenges.emailNormalized,
+              challenge.emailNormalized,
+            ),
+            isNull(registrationEmailChallenges.consumedAt),
+          ),
+        );
+      await transaction.insert(registrationEmailChallenges).values({
+        id: challenge.id,
+        email: challenge.email,
+        emailNormalized: challenge.emailNormalized,
+        codeHash: challenge.codeHash,
+        expiresAt: new Date(challenge.expiresAt),
+        attemptsRemaining: challenge.attemptsRemaining,
+        verifiedAt: challenge.verifiedAt
+          ? new Date(challenge.verifiedAt)
+          : null,
+        consumedAt: challenge.consumedAt
+          ? new Date(challenge.consumedAt)
+          : null,
+        createdAt: new Date(challenge.createdAt),
+      });
+    });
+    this.#registrationEmailChallenges.set(
+      challenge.emailNormalized,
+      structuredClone(challenge),
+    );
+  }
+
+  getRegistrationEmailChallenge(
+    emailNormalized: string,
+  ): RegistrationEmailChallengeRecord | undefined {
+    const challenge = this.#registrationEmailChallenges.get(emailNormalized);
+    return challenge ? structuredClone(challenge) : undefined;
+  }
+
+  async updateRegistrationEmailChallenge(
+    challenge: RegistrationEmailChallengeRecord,
+  ): Promise<void> {
+    await this.connection.db
+      .update(registrationEmailChallenges)
+      .set({
+        attemptsRemaining: challenge.attemptsRemaining,
+        verifiedAt: challenge.verifiedAt
+          ? new Date(challenge.verifiedAt)
+          : null,
+        consumedAt: challenge.consumedAt
+          ? new Date(challenge.consumedAt)
+          : null,
+      })
+      .where(eq(registrationEmailChallenges.id, challenge.id));
+    this.#registrationEmailChallenges.set(
+      challenge.emailNormalized,
+      structuredClone(challenge),
+    );
+  }
+
+  async recordRegistrationEmailFailure(
+    emailNormalized: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number> {
+    const result = await this.connection.client.query<{
+      attempts_remaining: number;
+      consumed_at: Date | string | null;
+    }>(
+      `UPDATE registration_email_challenges
+          SET attempts_remaining = GREATEST(0, attempts_remaining - 1),
+              consumed_at = CASE
+                WHEN attempts_remaining <= 1 THEN $3
+                ELSE consumed_at
+              END
+        WHERE id = $1 AND email_normalized = $2 AND consumed_at IS NULL
+      RETURNING attempts_remaining, consumed_at`,
+      [challengeId, emailNormalized, at],
+    );
+    const row = result.rows[0];
+    const challenge = this.#registrationEmailChallenges.get(emailNormalized);
+    if (row && challenge?.id === challengeId) {
+      challenge.attemptsRemaining = row.attempts_remaining;
+      challenge.consumedAt = row.consumed_at
+        ? new Date(row.consumed_at).toISOString()
+        : null;
+    }
+    return row?.attempts_remaining ?? 0;
+  }
+
+  async verifyRegistrationEmailChallenge(
+    emailNormalized: string,
+    challengeId: string,
+    at: string,
+  ): Promise<boolean> {
+    const result = await this.connection.client.query<{
+      verified_at: Date | string;
+    }>(
+      `UPDATE registration_email_challenges
+          SET verified_at = COALESCE(verified_at, $3)
+        WHERE id = $1
+          AND email_normalized = $2
+          AND consumed_at IS NULL
+          AND attempts_remaining > 0
+          AND expires_at > $3
+      RETURNING verified_at`,
+      [challengeId, emailNormalized, at],
+    );
+    const row = result.rows[0];
+    const challenge = this.#registrationEmailChallenges.get(emailNormalized);
+    if (row && challenge?.id === challengeId) {
+      challenge.verifiedAt = new Date(row.verified_at).toISOString();
+    }
+    return row !== undefined;
   }
 
   getPortfolioByAccountId(
@@ -1810,6 +1981,45 @@ export class DatabaseGameRepository implements GameRepository {
         codeHash: row.code_hash,
         expiresAt: new Date(row.expires_at).toISOString(),
         attemptsRemaining: row.attempts_remaining,
+        consumedAt: row.consumed_at
+          ? new Date(row.consumed_at).toISOString()
+          : null,
+        createdAt: new Date(row.created_at).toISOString(),
+      });
+    }
+
+    const registrationChallengeResult =
+      await this.connection.client.query<{
+        id: string;
+        email: string;
+        email_normalized: string;
+        code_hash: string;
+        expires_at: Date | string;
+        attempts_remaining: number;
+        verified_at: Date | string | null;
+        consumed_at: Date | string | null;
+        created_at: Date | string;
+      }>(
+        `SELECT id, email, email_normalized, code_hash, expires_at,
+                attempts_remaining, verified_at, consumed_at, created_at
+           FROM registration_email_challenges
+          WHERE consumed_at IS NULL AND expires_at > now()
+          ORDER BY created_at DESC`,
+      );
+    for (const row of registrationChallengeResult.rows) {
+      if (this.#registrationEmailChallenges.has(row.email_normalized)) {
+        continue;
+      }
+      this.#registrationEmailChallenges.set(row.email_normalized, {
+        id: row.id,
+        email: row.email,
+        emailNormalized: row.email_normalized,
+        codeHash: row.code_hash,
+        expiresAt: new Date(row.expires_at).toISOString(),
+        attemptsRemaining: row.attempts_remaining,
+        verifiedAt: row.verified_at
+          ? new Date(row.verified_at).toISOString()
+          : null,
         consumedAt: row.consumed_at
           ? new Date(row.consumed_at).toISOString()
           : null,

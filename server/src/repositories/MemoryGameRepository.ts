@@ -20,6 +20,8 @@ import type {
   PasswordResetChallengeRecord,
   PortfolioRecord,
   PositionRecord,
+  RegistrationEmailChallengeRecord,
+  RegistrationEmailVerificationCommit,
   SessionRecord,
   SettlementLotRecord,
   SettlementResult,
@@ -41,6 +43,10 @@ export class MemoryGameRepository implements GameRepository {
   readonly #emailVerificationChallenges = new Map<
     string,
     EmailVerificationChallengeRecord
+  >();
+  readonly #registrationEmailChallenges = new Map<
+    string,
+    RegistrationEmailChallengeRecord
   >();
   readonly #portfolios = new Map<string, PortfolioRecord>();
   readonly #portfolioIdsByAccount = new Map<string, string>();
@@ -119,7 +125,10 @@ export class MemoryGameRepository implements GameRepository {
     }
   }
 
-  async createAccount(commit: CreateAccountCommit): Promise<void> {
+  async createAccount(
+    commit: CreateAccountCommit,
+    registrationVerification?: RegistrationEmailVerificationCommit,
+  ): Promise<void> {
     if (
       this.#accountIdsByUsername.has(commit.account.usernameNormalized)
     ) {
@@ -130,6 +139,24 @@ export class MemoryGameRepository implements GameRepository {
       this.#accountIdsByEmail.has(commit.account.emailNormalized)
     ) {
       throw new Error("EMAIL_EXISTS");
+    }
+    const registrationChallenge = registrationVerification
+      ? this.#registrationEmailChallenges.get(
+          registrationVerification.emailNormalized,
+        )
+      : undefined;
+    if (
+      registrationVerification &&
+      (!registrationChallenge ||
+        registrationChallenge.id !== registrationVerification.challengeId ||
+        registrationChallenge.emailNormalized !==
+          commit.account.emailNormalized ||
+        !registrationChallenge.verifiedAt ||
+        registrationChallenge.consumedAt ||
+        new Date(registrationChallenge.expiresAt).getTime() <=
+          new Date(registrationVerification.consumedAt).getTime())
+    ) {
+      throw new Error("REGISTRATION_EMAIL_NOT_VERIFIED");
     }
 
     this.#accounts.set(commit.account.id, structuredClone(commit.account));
@@ -153,6 +180,9 @@ export class MemoryGameRepository implements GameRepository {
     );
     this.#positions.set(commit.portfolio.id, new Map());
     this.#transactions.set(commit.portfolio.id, []);
+    if (registrationChallenge && registrationVerification) {
+      registrationChallenge.consumedAt = registrationVerification.consumedAt;
+    }
   }
 
   getAccountById(accountId: string): AccountRecord | undefined {
@@ -352,6 +382,69 @@ export class MemoryGameRepository implements GameRepository {
       challenge.consumedAt = at;
     }
     return challenge.attemptsRemaining;
+  }
+
+  async replaceRegistrationEmailChallenge(
+    challenge: RegistrationEmailChallengeRecord,
+  ): Promise<void> {
+    this.#registrationEmailChallenges.set(
+      challenge.emailNormalized,
+      structuredClone(challenge),
+    );
+  }
+
+  getRegistrationEmailChallenge(
+    emailNormalized: string,
+  ): RegistrationEmailChallengeRecord | undefined {
+    const challenge = this.#registrationEmailChallenges.get(emailNormalized);
+    return challenge ? structuredClone(challenge) : undefined;
+  }
+
+  async updateRegistrationEmailChallenge(
+    challenge: RegistrationEmailChallengeRecord,
+  ): Promise<void> {
+    this.#registrationEmailChallenges.set(
+      challenge.emailNormalized,
+      structuredClone(challenge),
+    );
+  }
+
+  async recordRegistrationEmailFailure(
+    emailNormalized: string,
+    challengeId: string,
+    at: string,
+  ): Promise<number> {
+    const challenge = this.#registrationEmailChallenges.get(emailNormalized);
+    if (!challenge || challenge.id !== challengeId || challenge.consumedAt) {
+      return 0;
+    }
+    challenge.attemptsRemaining = Math.max(
+      0,
+      challenge.attemptsRemaining - 1,
+    );
+    if (challenge.attemptsRemaining === 0) {
+      challenge.consumedAt = at;
+    }
+    return challenge.attemptsRemaining;
+  }
+
+  async verifyRegistrationEmailChallenge(
+    emailNormalized: string,
+    challengeId: string,
+    at: string,
+  ): Promise<boolean> {
+    const challenge = this.#registrationEmailChallenges.get(emailNormalized);
+    if (
+      !challenge ||
+      challenge.id !== challengeId ||
+      challenge.consumedAt ||
+      challenge.attemptsRemaining <= 0 ||
+      new Date(challenge.expiresAt).getTime() <= new Date(at).getTime()
+    ) {
+      return false;
+    }
+    challenge.verifiedAt = challenge.verifiedAt ?? at;
+    return true;
   }
 
   getPortfolioByAccountId(
