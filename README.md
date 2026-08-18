@@ -8,7 +8,8 @@
 - 支持真实行情模拟盘，与虚拟盘使用独立资金、持仓和成交记录。
 - 支持市价单、限价单、撤单和订单管理；可按手、数量或资金比例交易，并区分 T+0、T+1 规则。
 - 提供自选股、持仓优先刷新、分时与 K 线图、盘口和账户详情。
-- 内置规则 AI 交易者；模拟盘还可选接入 OpenAI 兼容的本地 LLM，运行 10 名不同风格的智能交易者。
+- 内置有投资周期、持仓逻辑和共享市场因子的规则 AI 2.0；模拟盘还可选接入 OpenAI 兼容 LLM，运行 10 名不同风格的智能交易者。
+- 虚拟行情包含持久化公司价值、市场/行业周期、事件生命周期和长期资金所有权信号，不再只依赖短期随机波动。
 - 提供 Web 页面和 Android 客户端。
 - 注册邮箱先通过六位验证码验证；支持邮箱找回密码；旧账户登录或自动登录后会强制验证并补充邮箱，也支持服务器本机紧急重置。
 
@@ -48,13 +49,15 @@ npm run dev
 
 ## 持久配置与 SMTP
 
-复制根目录的 `config.example.json` 为 `config.json`。`smtp` 支持 QQ 邮箱 `smtp.qq.com:465` SSL 与授权码，仅发送验证码、不接收邮件；`llmTrading` 可选接入 llama.cpp。各段未启用或配置无效时会分别安全停用。
+复制根目录的 `config.example.json` 为 `config.json`。`smtp` 支持 QQ 邮箱 `smtp.qq.com:465` SSL 与授权码，仅发送验证码、不接收邮件；`llmTrading` 可接入 MiniMax 或 llama.cpp 等 OpenAI 兼容服务。`jsonSchemaMode` 默认 `object`，使用 MiniMax 兼容的 `json_object`；只有确认提供方支持严格 JSON Schema 时才设为 `strict`。
 
-配置路径统一按“显式启动参数 → `APP_CONFIG_PATH` → 工作目录 `config.json`”解析。Linux systemd 固定读取 `/var/lib/gupiaomoniqi/config.json`，Windows 启动器读取持久数据目录，应用更新不会覆盖。HTTP LLM 地址仅允许本机或可信局域网；公网模型接口请使用 HTTPS。具体部署和权限见 [运行性能与账户恢复](docs/运行性能与账户恢复.md)。
+配置路径统一按“显式启动参数 → `APP_CONFIG_PATH` → 工作目录 `config.json`”解析。Linux systemd 固定读取 `/var/lib/gupiaomoniqi/config.json`，Windows 启动器读取持久数据目录，应用更新不会覆盖。`llmTrading` 修改后自动热重载；坏 JSON 或文件短暂缺失时继续使用上一份有效配置。SMTP 修改仍需受控重启。HTTP LLM 地址仅允许本机或可信局域网；公网模型接口请使用 HTTPS。具体部署和权限见 [运行性能与账户恢复](docs/运行性能与账户恢复.md)。
 
 ## 性能与账户恢复
 
 服务端保留 4 GB V8 堆安全围栏，分钟 K 线采用有界内存缓存和按需历史查询；真实行情全市场默认 5 分钟刷新一轮，自选、持仓和详情热页仍按秒刷新。SMTP 配置、旧账户补邮箱和本机紧急改密命令见 [运行性能与账户恢复](docs/运行性能与账户恢复.md)。
+
+规则 AI 2.0、长期价值锚、所有权溢价和事件状态说明见 [规则 AI 2.0 与市场状态引擎](docs/规则AI2.0与市场状态引擎.md)。自动模拟事件可通过 `VIRTUAL_MARKET_EVENTS_ENABLED=false` 关闭。
 
 ## Android
 

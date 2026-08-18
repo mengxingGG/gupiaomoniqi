@@ -17,6 +17,7 @@ import type {
   InstrumentRecord,
   OrderRecord,
   OrderStateCommit,
+  OwnershipPositionRecord,
   PasswordResetChallengeRecord,
   PortfolioRecord,
   PositionRecord,
@@ -487,6 +488,38 @@ export class MemoryGameRepository implements GameRepository {
       (item) => item.idempotencyKey === idempotencyKey,
     );
     return transaction ? structuredClone(transaction) : undefined;
+  }
+
+  listOwnershipPositions(): OwnershipPositionRecord[] {
+    const result: OwnershipPositionRecord[] = [];
+    for (const [portfolioId, positions] of this.#positions) {
+      const portfolio = this.#portfolios.get(portfolioId);
+      const aiTraderId = this.#aiTraderIdsByPortfolio.get(portfolioId);
+      const aiTrader = aiTraderId
+        ? this.#aiTraders.get(aiTraderId)
+        : undefined;
+      const actorKind = aiTrader
+        ? aiTrader.traderKind === "LLM"
+          ? "LLM_AI"
+          : "RULE_AI"
+        : portfolio?.accountId
+          ? "PLAYER"
+          : null;
+      const actorId = aiTrader?.id ?? portfolio?.accountId;
+      if (!portfolio || !actorKind || !actorId) {
+        continue;
+      }
+      for (const position of positions.values()) {
+        result.push({
+          ...structuredClone(position),
+          portfolioId,
+          actorId,
+          actorKind,
+          initialCashUsd: portfolio.initialCashUsd,
+        });
+      }
+    }
+    return result;
   }
 
   listOrders(

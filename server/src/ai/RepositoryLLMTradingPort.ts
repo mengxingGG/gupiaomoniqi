@@ -81,6 +81,19 @@ export class RepositoryLLMTradingPort implements LLMTradingPort {
             winCount: 0,
             lossCount: 0,
             createdAt: now.toISOString(),
+            investmentHorizon:
+              persona.strategy === "VALUE" ||
+              persona.strategy === "CONSERVATIVE"
+                ? "LONG"
+                : persona.strategy === "AGGRESSIVE"
+                  ? "SHORT"
+                  : "SWING",
+            conviction: 0,
+            thesisInstrumentId: null,
+            thesisScore: 0,
+            thesisStartedAt: null,
+            minimumHoldUntil: null,
+            lastSignalVersion: null,
           },
         };
       });
@@ -196,10 +209,20 @@ export class RepositoryLLMTradingPort implements LLMTradingPort {
         }
         const leftScore =
           Math.abs(left.quote.changePercent) * 1_000 +
-          Math.log10(Math.max(1, left.quote.volume));
+          Math.log10(Math.max(1, left.quote.volume)) +
+          Math.abs(
+            this.engine?.getMarketSignal(left.instrument.id)
+              ?.expectedDailyReturn ?? 0,
+          ) *
+            10_000;
         const rightScore =
           Math.abs(right.quote.changePercent) * 1_000 +
-          Math.log10(Math.max(1, right.quote.volume));
+          Math.log10(Math.max(1, right.quote.volume)) +
+          Math.abs(
+            this.engine?.getMarketSignal(right.instrument.id)
+              ?.expectedDailyReturn ?? 0,
+          ) *
+            10_000;
         return rightScore - leftScore;
       });
     const candidates = ranked
@@ -484,6 +507,7 @@ export class RepositoryLLMTradingPort implements LLMTradingPort {
       .slice(-20)
       .map(toCandleContext);
     const closes = dailyBars.map((bar) => bar.close);
+    const marketSignal = this.engine?.getMarketSignal(instrumentId);
     return {
       instrumentId,
       symbol: instrument.symbol,
@@ -501,6 +525,17 @@ export class RepositoryLLMTradingPort implements LLMTradingPort {
       volume: quote.volume,
       liquidity: instrument.liquidity,
       volatility: instrument.volatility,
+      fundamentalValue: marketSignal?.fundamentalValue,
+      targetPrice: marketSignal?.targetPrice,
+      fundamentalGap: marketSignal?.fundamentalGap,
+      expectedDailyReturn: marketSignal?.expectedDailyReturn,
+      ownershipPremium: marketSignal?.ownershipPremium,
+      eventSentiment: marketSignal?.eventSentiment,
+      marketDriftPerDay: marketSignal?.marketDriftPerDay,
+      sectorDriftPerDay: marketSignal?.sectorDriftPerDay,
+      qualityScore: marketSignal?.qualityScore,
+      growthScore: marketSignal?.growthScore,
+      leverageRisk: marketSignal?.leverageRisk,
       distanceToUpperLimitPercent: roundPercent(
         ((quote.previousClose * 1.1 - quote.currentPrice) /
           quote.currentPrice) *

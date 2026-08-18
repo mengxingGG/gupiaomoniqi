@@ -17,6 +17,7 @@
     "db:inspect:real": "tsx server/src/real-market/db/inspect.ts",
     "local:prepare": "tsx server/src/startup/localPrepare.ts",
     "ai:benchmark": "tsx scripts/benchmark-ai.ts",
+    "ai:v2:benchmark": "tsx scripts/benchmark-rule-ai-v2.ts",
     "runtime:benchmark": "tsx scripts/benchmark-runtime.ts",
     "gift-code:add": "tsx scripts/add-gift-code.ts",
     "account:reset-password": "tsx scripts/reset-account-password.ts",

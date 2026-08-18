@@ -6,7 +6,7 @@ import {
 } from "../src/ai/LLMTradingClient.js";
 
 describe("LlamaCppTradingClient", () => {
-  it("调用 OpenAI 兼容接口并请求严格 JSON schema", async () => {
+  it("默认使用 MiniMax 兼容的 json_object，不发送 llama.cpp 专属字段", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({
@@ -37,6 +37,25 @@ describe("LlamaCppTradingClient", () => {
     expect(request).toMatchObject({
       model: "local-model",
       stream: false,
+      response_format: {
+        type: "json_object",
+      },
+    });
+    expect(request).not.toHaveProperty("chat_template_kwargs");
+    expect(request.response_format).not.toHaveProperty("json_schema");
+  });
+
+  it("显式 strict 时才发送 llama.cpp 严格 JSON schema", async () => {
+    const fetchMock = vi.fn(async () => responseWithDecision(validDecision()));
+    const client = new LlamaCppTradingClient(
+      config({ jsonSchemaMode: "strict" }),
+      fetchMock as typeof fetch,
+    );
+
+    await client.requestDecision({ system: "system", user: "market" });
+    const request = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(request).toMatchObject({
+      chat_template_kwargs: { enable_thinking: false },
       response_format: {
         type: "json_schema",
         json_schema: { strict: true },
@@ -119,6 +138,7 @@ function config(overrides: Partial<LLMTradingConfig> = {}): LLMTradingConfig {
     baseUrl: "http://127.0.0.1:8080/v1",
     modelId: "local-model",
     apiKey: "",
+    jsonSchemaMode: "object",
     agentCount: 10,
     contextWindow: 32_768,
     requestTimeoutMs: 300_000,

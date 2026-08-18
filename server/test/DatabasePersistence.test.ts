@@ -345,6 +345,9 @@ describe("DatabaseGameRepository", () => {
       expect(reloaded.getAITrader(aiTraderId)).toMatchObject({
         lastActionAt: now.toISOString(),
         totalTrades: round.trades,
+        investmentHorizon: "SWING",
+        thesisInstrumentId: "cn-600519",
+        thesisStartedAt: now.toISOString(),
       });
       const aiPosition = reloaded.getPosition(
         aiPortfolioId,
@@ -354,6 +357,7 @@ describe("DatabaseGameRepository", () => {
       expect(aiPosition?.instrumentId).toBe("cn-600519");
       expect(aiPosition?.quantity ?? 0).toBeGreaterThan(0);
       expect(aiPosition?.availableQuantity).toBe(0);
+      expect(aiPosition?.openedAt).toBe(now.toISOString());
 
       const settlementCount = await client.query<{ count: number }>(
         `SELECT count(*)::int AS count

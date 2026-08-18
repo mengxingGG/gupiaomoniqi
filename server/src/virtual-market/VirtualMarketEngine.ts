@@ -10,12 +10,17 @@ import type {
   GameRepository,
   InstrumentRecord,
 } from "../repositories/GameRepository.js";
+import {
+  MarketStateService,
+  type ScheduleVirtualMarketEventInput,
+  type VirtualMarketSignal,
+} from "./MarketStateService.js";
 
 export type RandomSource = () => number;
 export type Clock = () => Date;
 
 export const VIRTUAL_MARKET_IMPACT_RULES = {
-  naturalVolatilityMultiplier: 1.2,
+  naturalVolatilityMultiplier: 1,
   minimumDepthUsd: 1_000_000,
   maximumDepthUsd: 100_000_000,
   depthLiquidityMultiplier: 20,
@@ -36,16 +41,28 @@ export class VirtualMarketEngine {
   readonly #pendingSignedTradeNotionalUsd = new Map<string, number>();
   readonly #instrumentsById = new Map<string, InstrumentRecord>();
   readonly #quotesById = new Map<string, Quote>();
+  readonly marketState: MarketStateService;
+  #lastTickAtMs: number | null = null;
 
   constructor(
     private readonly repository: GameRepository,
     private readonly seeds: InstrumentRecord[],
     private readonly random: RandomSource = Math.random,
     private readonly clock: Clock = () => new Date(),
+    marketState?: MarketStateService,
   ) {
     for (const instrument of seeds) {
       this.#instrumentsById.set(instrument.id, instrument);
     }
+    this.marketState =
+      marketState ??
+      new MarketStateService(
+        repository,
+        seeds,
+        undefined,
+        random,
+        clock,
+      );
   }
 
   recordTrade(
@@ -108,6 +125,7 @@ export class VirtualMarketEngine {
     const existing = this.repository.listQuotes();
     if (existing.length > 0) {
       this.#replaceQuoteCache(existing);
+      await this.marketState.initialize(existing);
       return existing;
     }
 
@@ -130,6 +148,7 @@ export class VirtualMarketEngine {
 
     await this.repository.saveQuotes(quotes);
     this.#replaceQuoteCache(quotes);
+    await this.marketState.initialize(quotes);
     return quotes;
   }
 
@@ -137,6 +156,20 @@ export class VirtualMarketEngine {
     await this.initialize();
 
     const tickAt = this.clock();
+    const rawElapsedMs =
+      tickAt.getTime() -
+      (this.#lastTickAtMs ?? tickAt.getTime() - GAME_RULES.tickIntervalMs);
+    const pricingElapsedMs = clamp(
+      rawElapsedMs,
+      250,
+      24 * 60 * 60_000,
+    );
+    const microElapsedMs = clamp(rawElapsedMs, 250, 60_000);
+    this.#lastTickAtMs = tickAt.getTime();
+    const elapsedDays = pricingElapsedMs / (24 * 60 * 60_000);
+    const microTimeScale = Math.sqrt(
+      microElapsedMs / (24 * 60 * 60_000),
+    );
     const timestamp = tickAt.toISOString();
     const currentMarketFactors = new Map<string, number>();
     const currentMarketDates = new Map<string, string>();
@@ -149,12 +182,14 @@ export class VirtualMarketEngine {
       const previousMarketFactor =
         this.#marketFactors.get(instrument.market) ?? 0;
       const marketFactor = clamp(
-        previousMarketFactor * 0.82 +
+        previousMarketFactor * 0.9 +
           this.#centeredRandom(
-            0.00055 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+            0.006 *
+              microTimeScale *
+              VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
           ),
-        -0.0012 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
-        0.0012 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+        -0.001,
+        0.001,
       );
       this.#marketFactors.set(instrument.market, marketFactor);
       currentMarketFactors.set(instrument.market, marketFactor);
@@ -163,6 +198,8 @@ export class VirtualMarketEngine {
         marketDateKey(instrument.market, tickAt),
       );
     }
+
+    await this.marketState.refresh([...this.#quotesById.values()], tickAt);
 
     const quotes = this.seeds.map((instrument) => {
       const current = this.#quotesById.get(instrument.id);
@@ -191,21 +228,37 @@ export class VirtualMarketEngine {
       const previousSectorFactor =
         this.#sectorFactors.get(sectorKey) ?? 0;
       const sectorFactor = clamp(
-        previousSectorFactor * 0.76 +
+        previousSectorFactor * 0.86 +
           this.#centeredRandom(
-            0.00035 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+            0.004 *
+              microTimeScale *
+              VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
           ),
-        -0.0008 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
-        0.0008 * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
+        -0.0007,
+        0.0007,
       );
       this.#sectorFactors.set(sectorKey, sectorFactor);
 
       const distanceFromClose =
         (working.currentPrice - working.previousClose) /
         working.previousClose;
-      const meanReversion = -distanceFromClose * 0.018;
-      const individualNoise = this.#centeredRandom(
+      const meanReversion =
+        -distanceFromClose *
+        (1 - Math.exp(-pricingElapsedMs / (6 * 60 * 60_000)));
+      const marketSignal = this.marketState.getSignal(
+        instrument.id,
+        working.currentPrice,
+      );
+      const dailyVolatility = clamp(
         instrument.volatility *
+          10 *
+          (marketSignal?.volatilityMultiplier ?? 1),
+        0.008,
+        0.065,
+      );
+      const individualNoise = this.#centeredRandom(
+        dailyVolatility *
+          microTimeScale *
           VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
       );
       const pendingVolume =
@@ -265,7 +318,11 @@ export class VirtualMarketEngine {
         VIRTUAL_MARKET_IMPACT_RULES.maximumAppliedImpactPerTickRate,
       );
       const naturalChangeRate = clamp(
-        marketFactor + sectorFactor + individualNoise + meanReversion,
+        marketFactor +
+          sectorFactor +
+          individualNoise +
+          meanReversion +
+          (marketSignal?.expectedDailyReturn ?? 0) * elapsedDays,
         -GAME_RULES.maxTickChangeRate,
         GAME_RULES.maxTickChangeRate,
       );
@@ -337,6 +394,21 @@ export class VirtualMarketEngine {
     await this.repository.saveQuotes(quotes);
     this.#replaceQuoteCache(quotes);
     return quotes;
+  }
+
+  getMarketSignal(instrumentId: string): VirtualMarketSignal | undefined {
+    const quote = this.#quotesById.get(instrumentId);
+    return quote
+      ? this.marketState.getSignal(instrumentId, quote.currentPrice)
+      : undefined;
+  }
+
+  getMarketSignalVersion(): string {
+    return this.marketState.signalVersion;
+  }
+
+  scheduleMarketEvent(input: ScheduleVirtualMarketEventInput) {
+    return this.marketState.scheduleEvent(input);
   }
 
   #centeredRandom(amplitude: number): number {

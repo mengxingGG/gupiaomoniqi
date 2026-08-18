@@ -655,6 +655,7 @@ export class TradeService {
         averageCostUsd: roundUnitPrice(
           (oldCostUsd + grossAmountUsd + feeUsd) / newQuantity,
         ),
+        openedAt: oldPosition?.openedAt ?? now.toISOString(),
       };
     } else {
       if (options.reservedOrder) {

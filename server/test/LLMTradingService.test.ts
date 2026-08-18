@@ -243,6 +243,7 @@ function config(): LLMTradingConfig {
     baseUrl: "http://127.0.0.1:8080/v1",
     modelId: "local-model",
     apiKey: "",
+    jsonSchemaMode: "object",
     agentCount: 10,
     contextWindow: 32_768,
     requestTimeoutMs: 300_000,

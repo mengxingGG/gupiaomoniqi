@@ -65,6 +65,17 @@ export interface LLMMarketCandidate {
   volume: number;
   liquidity: number;
   volatility: number;
+  fundamentalValue?: number;
+  targetPrice?: number;
+  fundamentalGap?: number;
+  expectedDailyReturn?: number;
+  ownershipPremium?: number;
+  eventSentiment?: number;
+  marketDriftPerDay?: number;
+  sectorDriftPerDay?: number;
+  qualityScore?: number;
+  growthScore?: number;
+  leverageRisk?: number;
   distanceToUpperLimitPercent?: number;
   distanceToLowerLimitPercent?: number;
   netOrderFlow?: number;
@@ -169,6 +180,17 @@ function compactContext(
             volume: candidate.volume,
             liquidity: candidate.liquidity,
             volatility: candidate.volatility,
+            fundamentalValue: candidate.fundamentalValue,
+            targetPrice: candidate.targetPrice,
+            fundamentalGap: candidate.fundamentalGap,
+            expectedDailyReturn: candidate.expectedDailyReturn,
+            ownershipPremium: candidate.ownershipPremium,
+            eventSentiment: candidate.eventSentiment,
+            marketDriftPerDay: candidate.marketDriftPerDay,
+            sectorDriftPerDay: candidate.sectorDriftPerDay,
+            qualityScore: candidate.qualityScore,
+            growthScore: candidate.growthScore,
+            leverageRisk: candidate.leverageRisk,
             netOrderFlow: candidate.netOrderFlow,
             indicators: candidate.indicators,
           },

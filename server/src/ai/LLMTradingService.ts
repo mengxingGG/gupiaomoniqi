@@ -77,6 +77,7 @@ export interface LLMTradingRoundResult {
 export interface LLMTradingServiceStatus {
   enabled: true;
   modelId: string;
+  jsonSchemaMode: LLMTradingConfig["jsonSchemaMode"];
   agentCount: number;
   runningRequests: number;
   completedRequests: number;
@@ -139,6 +140,7 @@ export class LLMTradingService {
     return {
       enabled: true,
       modelId: this.config.modelId,
+      jsonSchemaMode: this.config.jsonSchemaMode,
       agentCount: this.#personas.length,
       runningRequests: this.#runningRequests,
       completedRequests: this.#completedRequests,

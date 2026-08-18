@@ -53,6 +53,7 @@ import { AITradingService } from "./ai/AITradingService.js";
 import { LlamaCppTradingClient } from "./ai/LLMTradingClient.js";
 import { LLMTradingRuntime } from "./ai/LLMTradingRuntime.js";
 import { LLMTradingService } from "./ai/LLMTradingService.js";
+import { ReloadableLLMTradingRuntime } from "./ai/ReloadableLLMTradingRuntime.js";
 import { RepositoryLLMTradingPort } from "./ai/RepositoryLLMTradingPort.js";
 import { AppUpdateService } from "./app-update/AppUpdateService.js";
 import { registerAppUpdateRoutes } from "./app-update/registerAppUpdateRoutes.js";
@@ -66,6 +67,10 @@ import {
   loadRootConfig,
   resolveRootConfigPath,
 } from "./config/RootConfig.js";
+import {
+  startRootConfigWatcher,
+  type RootConfigWatcher,
+} from "./config/RootConfigWatcher.js";
 import type { DatabaseConnection } from "./db/client.js";
 import { openDatabase } from "./db/client.js";
 import { migrateDatabase } from "./db/migrations.js";
@@ -115,6 +120,11 @@ import { SystemLoadController } from "./runtime/SystemLoadController.js";
 import { ensureVirtualMarketUniverse } from "./startup/marketSeedBootstrap.js";
 import { VirtualMarketEngine } from "./virtual-market/VirtualMarketEngine.js";
 import { VirtualMarketRuntime } from "./virtual-market/VirtualMarketRuntime.js";
+import { MarketStateService } from "./virtual-market/MarketStateService.js";
+import {
+  DatabaseVirtualMarketStateStore,
+  MemoryVirtualMarketStateStore,
+} from "./virtual-market/MarketStateStore.js";
 
 const tradeSchema = z.object({
   instrumentId: z.string().trim().min(1),
@@ -274,7 +284,7 @@ export interface ApplicationContext {
   runtime: VirtualMarketRuntime;
   aiRuntime: AITradingRuntime;
   aiTradingService: AITradingService;
-  llmTradingRuntime: LLMTradingRuntime | null;
+  llmTradingRuntime: ReloadableLLMTradingRuntime;
   llmTradingService: LLMTradingService | null;
   authService: AuthService;
   candleService: CandleService;
@@ -288,6 +298,7 @@ export interface ApplicationContext {
   accountFeatureStore: AccountFeatureStore;
   rewardService: RewardService;
   loadController: SystemLoadController;
+  marketStateService: MarketStateService;
 }
 
 export interface CreateApplicationOptions {
@@ -307,8 +318,12 @@ export interface CreateApplicationOptions {
   realRepository?: RealMarketRepository;
   realSyncEnabled?: boolean;
   realFetchImplementation?: typeof fetch;
+  virtualMarketEventsEnabled?: boolean;
   appUpdateDirectory?: string;
   rootConfigPath?: string;
+  rootConfigWatchEnabled?: boolean;
+  rootConfigWatchIntervalMs?: number;
+  rootConfigWatchDebounceMs?: number;
   llmFetchImplementation?: typeof fetch;
   passwordResetMailer?: PasswordResetMailer | null;
   registrationEmailVerificationRequired?: boolean;
@@ -449,11 +464,23 @@ export async function createApplication(
   startupLog("real runtime ready");
 
   startupLog("initializing virtual engine");
+  const marketStateService = new MarketStateService(
+    repository,
+    repository.listInstruments(),
+    primaryConnection
+      ? new DatabaseVirtualMarketStateStore(primaryConnection.client)
+      : new MemoryVirtualMarketStateStore(),
+    options.random,
+    clock,
+    options.virtualMarketEventsEnabled ??
+      process.env.VIRTUAL_MARKET_EVENTS_ENABLED !== "false",
+  );
   const engine = new VirtualMarketEngine(
     repository,
     repository.listInstruments(),
     options.random,
     clock,
+    marketStateService,
   );
   await engine.initialize();
   startupLog("virtual engine ready");
@@ -494,26 +521,30 @@ export async function createApplication(
     clock,
     engine,
   );
-  const llmTradingService = rootConfig.llmTrading
-    ? new LLMTradingService(
-        rootConfig.llmTrading,
-        new LlamaCppTradingClient(
-          rootConfig.llmTrading,
-          options.llmFetchImplementation,
-        ),
-        new RepositoryLLMTradingPort(
-          repository,
-          tradeService,
-          engine,
-          clock,
-        ),
+  const llmTradingPort = new RepositoryLLMTradingPort(
+    repository,
+    tradeService,
+    engine,
+    clock,
+  );
+  const llmTradingRuntime = new ReloadableLLMTradingRuntime(
+    rootConfig.llmTrading,
+    rootConfig.state,
+    rootConfig.error,
+    (config) => {
+      const service = new LLMTradingService(
+        config,
+        new LlamaCppTradingClient(config, options.llmFetchImplementation),
+        llmTradingPort,
         clock,
         options.random,
-      )
-    : null;
-  const llmTradingRuntime = llmTradingService
-    ? new LLMTradingRuntime(llmTradingService)
-    : null;
+      );
+      return {
+        service,
+        runtime: new LLMTradingRuntime(service),
+      };
+    },
+  );
   const aiEnabled =
     options.aiEnabled ??
     (!options.repository &&
@@ -525,6 +556,7 @@ export async function createApplication(
     options.random,
     clock,
     aiEnabled,
+    engine,
   );
   await aiTradingService.ensurePopulation(
     options.aiTraderCount ?? GAME_RULES.aiTraderCount,
@@ -597,6 +629,7 @@ export async function createApplication(
   const MAINTENANCE_DEEP_MS = 4 * 60 * 60 * 1000;
   let quickTimer: ReturnType<typeof setInterval> | null = null;
   let deepTimer: ReturnType<typeof setInterval> | null = null;
+  let rootConfigWatcher: RootConfigWatcher | null = null;
 
   async function runQuickMaintenance() {
     try {
@@ -638,6 +671,57 @@ export async function createApplication(
   const app = Fastify({
     logger: options.logger ?? false,
   });
+  if (options.rootConfigWatchEnabled ?? true) {
+    rootConfigWatcher = startRootConfigWatcher({
+      path: rootConfigPath,
+      intervalMs: options.rootConfigWatchIntervalMs,
+      debounceMs: options.rootConfigWatchDebounceMs,
+      onChange: async () => {
+        const nextRootConfig = await loadRootConfig({ path: rootConfigPath });
+        if (
+          nextRootConfig.state === "INVALID" ||
+          nextRootConfig.state === "MISSING"
+        ) {
+          llmTradingRuntime.reportReloadFailure(
+            nextRootConfig.state,
+            nextRootConfig.error,
+          );
+          app.log.warn(
+            {
+              path: rootConfigPath,
+              state: nextRootConfig.state,
+              error: nextRootConfig.error,
+            },
+            "LLM config hot reload skipped; keeping the last valid configuration",
+          );
+          return;
+        }
+
+        await llmTradingRuntime.reload(
+          nextRootConfig.llmTrading,
+          nextRootConfig.state,
+          nextRootConfig.error,
+        );
+        app.log.info(
+          {
+            path: rootConfigPath,
+            state: nextRootConfig.state,
+            modelId: nextRootConfig.llmTrading?.modelId ?? null,
+            jsonSchemaMode:
+              nextRootConfig.llmTrading?.jsonSchemaMode ?? null,
+          },
+          "LLM config hot reload completed",
+        );
+      },
+      onError: (error) => {
+        llmTradingRuntime.reportReloadFailure(
+          "INVALID",
+          error instanceof Error ? error.message : String(error),
+        );
+        app.log.error(error, "LLM config hot reload failed");
+      },
+    });
+  }
   const appUpdateService = new AppUpdateService(
     options.appUpdateDirectory ??
       process.env.APP_UPDATE_DIR ??
@@ -698,13 +782,12 @@ export async function createApplication(
       accountModel: "SINGLE_USD_LEDGER",
       usdCnyRate: GAME_RULES.usdCnyDisplayRate,
       aiTrading: aiTradingService.getStatus(),
-      llmTrading: llmTradingService
-        ? llmTradingService.getStatus()
-        : { enabled: false, configurationState: rootConfig.state },
+      llmTrading: llmTradingRuntime.getStatus(),
       chartSource: "DATABASE_RECORDED",
       realMarket: realRuntime.getStatus(),
       loadControl: loadController.getStatus(),
       runtimeMemory: runtimeMemoryStatus(),
+      virtualMarketState: marketStateService.getStatus(),
       emailDelivery: {
         configured: passwordResetMailer !== null,
         mode: "SMTP_SEND_ONLY",
@@ -1326,14 +1409,28 @@ export async function createApplication(
   }));
 
   app.get("/api/ai/llm/status", async () => ({
-    data: llmTradingService
-      ? llmTradingService.getStatus()
-      : {
-          enabled: false,
-          configurationState: rootConfig.state,
-          error: rootConfig.error,
-        },
+    data: llmTradingRuntime.getStatus(),
   }));
+
+  app.get("/api/ai/market-state/status", async () => ({
+    data: marketStateService.getStatus(),
+  }));
+
+  app.get<{
+    Querystring: { limit?: string };
+    Reply: ApiEnvelope<ReturnType<MarketStateService["listEvents"]>> | ApiError;
+  }>("/api/ai/market-events", async (request, reply) => {
+    const parsed = rankingSchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        code: "INVALID_EVENT_QUERY",
+        message: "事件数量参数无效",
+      });
+    }
+    return {
+      data: marketStateService.listEvents().slice(0, parsed.data.limit),
+    };
+  });
 
   app.get<{
     Querystring: { limit?: string };
@@ -1899,6 +1996,7 @@ export async function createApplication(
     if (quickTimer) { clearInterval(quickTimer); quickTimer = null; }
     if (deepTimer) { clearInterval(deepTimer); deepTimer = null; }
     loadController.stop();
+    await rootConfigWatcher?.stop();
     runtime.stop();
     aiRuntime.stop();
     await llmTradingRuntime?.stopAndWait();
@@ -1923,7 +2021,9 @@ export async function createApplication(
     aiRuntime,
     aiTradingService,
     llmTradingRuntime,
-    llmTradingService,
+    get llmTradingService() {
+      return llmTradingRuntime.service;
+    },
     authService,
     candleService,
     marketDetailService,
@@ -1936,6 +2036,7 @@ export async function createApplication(
     accountFeatureStore,
     rewardService,
     loadController,
+    marketStateService,
   };
 }
 

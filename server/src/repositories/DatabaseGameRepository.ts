@@ -51,6 +51,7 @@ import type {
   InstrumentRecord,
   OrderRecord,
   OrderStateCommit,
+  OwnershipPositionRecord,
   PasswordResetChallengeRecord,
   PortfolioRecord,
   PositionRecord,
@@ -74,6 +75,11 @@ interface InstrumentQuoteRow {
   lot_size: number;
   settlement_cycle: SettlementCycle;
   initial_price: number;
+  source_initial_price: number;
+  source_volume: number;
+  source_turnover: number;
+  total_market_cap: number | null;
+  circulating_market_cap: number | null;
   volatility: number;
   liquidity: number;
   current_price: number;
@@ -941,6 +947,38 @@ export class DatabaseGameRepository implements GameRepository {
     return transaction ? structuredClone(transaction) : undefined;
   }
 
+  listOwnershipPositions(): OwnershipPositionRecord[] {
+    const result: OwnershipPositionRecord[] = [];
+    for (const [portfolioId, positionsByInstrument] of this.#positions) {
+      const portfolio = this.#portfolios.get(portfolioId);
+      const aiTraderId = this.#aiTraderIdsByPortfolio.get(portfolioId);
+      const aiTrader = aiTraderId
+        ? this.#aiTraders.get(aiTraderId)
+        : undefined;
+      const actorKind = aiTrader
+        ? aiTrader.traderKind === "LLM"
+          ? "LLM_AI"
+          : "RULE_AI"
+        : portfolio?.accountId
+          ? "PLAYER"
+          : null;
+      const actorId = aiTrader?.id ?? portfolio?.accountId;
+      if (!portfolio || !actorKind || !actorId) {
+        continue;
+      }
+      for (const position of positionsByInstrument.values()) {
+        result.push({
+          ...structuredClone(position),
+          portfolioId,
+          actorId,
+          actorKind,
+          initialCashUsd: portfolio.initialCashUsd,
+        });
+      }
+    }
+    return result;
+  }
+
   listOrders(
     portfolioId: string,
     status?: OrderStatus,
@@ -1024,6 +1062,9 @@ export class DatabaseGameRepository implements GameRepository {
               frozenQuantity: commit.position.frozenQuantity,
               averageCost: commit.position.averageCostUsd,
               averageCostUsd: commit.position.averageCostUsd,
+              openedAt: new Date(
+                commit.position.openedAt ?? commit.occurredAt,
+              ),
               updatedAt: new Date(commit.occurredAt),
             })
             .onConflictDoUpdate({
@@ -1123,6 +1164,9 @@ export class DatabaseGameRepository implements GameRepository {
             frozenQuantity: commit.position.frozenQuantity,
             averageCost: commit.position.averageCostUsd,
             averageCostUsd: commit.position.averageCostUsd,
+            openedAt: new Date(
+              commit.position.openedAt ?? commit.occurredAt,
+            ),
             updatedAt: new Date(commit.occurredAt),
           })
           .onConflictDoUpdate({
@@ -1413,6 +1457,17 @@ export class DatabaseGameRepository implements GameRepository {
             totalTrades: trader.totalTrades,
             winCount: trader.winCount,
             lossCount: trader.lossCount,
+            investmentHorizon: trader.investmentHorizon ?? "SWING",
+            conviction: trader.conviction ?? 0,
+            thesisInstrumentId: trader.thesisInstrumentId ?? null,
+            thesisScore: trader.thesisScore ?? 0,
+            thesisStartedAt: trader.thesisStartedAt
+              ? new Date(trader.thesisStartedAt)
+              : null,
+            minimumHoldUntil: trader.minimumHoldUntil
+              ? new Date(trader.minimumHoldUntil)
+              : null,
+            lastSignalVersion: trader.lastSignalVersion ?? null,
             createdAt: new Date(trader.createdAt),
           })),
         );
@@ -1470,6 +1525,17 @@ export class DatabaseGameRepository implements GameRepository {
               totalTrades: trader.totalTrades,
               winCount: trader.winCount,
               lossCount: trader.lossCount,
+              investmentHorizon: trader.investmentHorizon ?? "SWING",
+              conviction: trader.conviction ?? 0,
+              thesisInstrumentId: trader.thesisInstrumentId ?? null,
+              thesisScore: trader.thesisScore ?? 0,
+              thesisStartedAt: trader.thesisStartedAt
+                ? new Date(trader.thesisStartedAt)
+                : null,
+              minimumHoldUntil: trader.minimumHoldUntil
+                ? new Date(trader.minimumHoldUntil)
+                : null,
+              lastSignalVersion: trader.lastSignalVersion ?? null,
               createdAt: new Date(trader.createdAt),
             })),
           )
@@ -1490,6 +1556,13 @@ export class DatabaseGameRepository implements GameRepository {
               totalTrades: sql`excluded.total_trades`,
               winCount: sql`excluded.win_count`,
               lossCount: sql`excluded.loss_count`,
+              investmentHorizon: sql`excluded.investment_horizon`,
+              conviction: sql`excluded.conviction`,
+              thesisInstrumentId: sql`excluded.thesis_instrument_id`,
+              thesisScore: sql`excluded.thesis_score`,
+              thesisStartedAt: sql`excluded.thesis_started_at`,
+              minimumHoldUntil: sql`excluded.minimum_hold_until`,
+              lastSignalVersion: sql`excluded.last_signal_version`,
             },
           });
       }
@@ -1537,7 +1610,9 @@ export class DatabaseGameRepository implements GameRepository {
         `SELECT i.id, i.symbol, i.name, i.market, i.source_currency,
                 i.settlement_currency AS quote_currency, i.type, i.industry,
                 i.is_tradable, i.lot_size, i.settlement_cycle,
-                i.initial_price::float8,
+                i.initial_price::float8, i.source_initial_price::float8,
+                i.source_volume::float8, i.source_turnover::float8,
+                i.total_market_cap::float8, i.circulating_market_cap::float8,
                 i.volatility::float8, i.liquidity,
                 q.current_price::float8, q.previous_close::float8,
                 q.open_price::float8, q.high_price::float8,
@@ -1563,6 +1638,11 @@ export class DatabaseGameRepository implements GameRepository {
         lotSize: row.lot_size,
         settlementCycle: row.settlement_cycle,
         initialPrice: row.initial_price,
+        sourceInitialPrice: row.source_initial_price,
+        sourceVolume: row.source_volume,
+        sourceTurnover: row.source_turnover,
+        totalMarketCap: row.total_market_cap,
+        circulatingMarketCap: row.circulating_market_cap,
         volatility: row.volatility,
         liquidity: row.liquidity,
       });
@@ -1729,13 +1809,23 @@ export class DatabaseGameRepository implements GameRepository {
       total_trades: number;
       win_count: number;
       loss_count: number;
+      investment_horizon: "SHORT" | "SWING" | "LONG";
+      conviction: number;
+      thesis_instrument_id: string | null;
+      thesis_score: number;
+      thesis_started_at: Date | string | null;
+      minimum_hold_until: Date | string | null;
+      last_signal_version: string | null;
       created_at: Date | string;
     }>(
       `SELECT id, portfolio_id, name, strategy, psychology,
               risk_level, activity_level, preferred_market,
               trader_kind, persona_key, is_active,
               last_action_at, next_action_at, total_trades,
-              win_count, loss_count, created_at
+              win_count, loss_count, investment_horizon,
+              conviction::float8, thesis_instrument_id,
+              thesis_score::float8, thesis_started_at,
+              minimum_hold_until, last_signal_version, created_at
          FROM ai_traders`,
     );
 
@@ -1759,6 +1849,17 @@ export class DatabaseGameRepository implements GameRepository {
         totalTrades: row.total_trades,
         winCount: row.win_count,
         lossCount: row.loss_count,
+        investmentHorizon: row.investment_horizon,
+        conviction: row.conviction,
+        thesisInstrumentId: row.thesis_instrument_id,
+        thesisScore: row.thesis_score,
+        thesisStartedAt: row.thesis_started_at
+          ? new Date(row.thesis_started_at).toISOString()
+          : null,
+        minimumHoldUntil: row.minimum_hold_until
+          ? new Date(row.minimum_hold_until).toISOString()
+          : null,
+        lastSignalVersion: row.last_signal_version,
         createdAt: new Date(row.created_at).toISOString(),
       };
       this.#aiTraders.set(trader.id, trader);
@@ -1820,10 +1921,11 @@ export class DatabaseGameRepository implements GameRepository {
       available_quantity: number;
       frozen_quantity: number;
       average_cost_usd: number;
+      opened_at: Date | string;
     }>(
       `SELECT p.id, p.portfolio_id, p.instrument_id, p.quantity,
               p.available_quantity, p.frozen_quantity,
-              p.average_cost_usd::float8
+              p.average_cost_usd::float8, p.opened_at
          FROM positions p
          JOIN portfolios pf ON pf.id = p.portfolio_id`,
     );
@@ -1836,6 +1938,7 @@ export class DatabaseGameRepository implements GameRepository {
         availableQuantity: row.available_quantity,
         frozenQuantity: row.frozen_quantity,
         averageCostUsd: row.average_cost_usd,
+        openedAt: new Date(row.opened_at).toISOString(),
       });
     }
 

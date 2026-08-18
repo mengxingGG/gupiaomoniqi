@@ -692,6 +692,82 @@ const REGISTRATION_EMAIL_VERIFICATION_MIGRATION = [
     ON registration_email_challenges (expires_at)`,
 ];
 
+const MARKET_STATE_AND_RULE_AI_V2_MIGRATION = [
+  `ALTER TABLE positions
+    ADD COLUMN IF NOT EXISTS opened_at timestamptz`,
+  `UPDATE positions
+      SET opened_at = COALESCE(opened_at, updated_at, now())
+    WHERE opened_at IS NULL`,
+  `ALTER TABLE positions ALTER COLUMN opened_at SET DEFAULT now()`,
+  `ALTER TABLE positions ALTER COLUMN opened_at SET NOT NULL`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS investment_horizon text NOT NULL DEFAULT 'SWING'`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS conviction numeric(8, 6) NOT NULL DEFAULT 0`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS thesis_instrument_id text REFERENCES instruments(id) ON DELETE SET NULL`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS thesis_score numeric(12, 8) NOT NULL DEFAULT 0`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS thesis_started_at timestamptz`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS minimum_hold_until timestamptz`,
+  `ALTER TABLE ai_traders
+    ADD COLUMN IF NOT EXISTS last_signal_version text`,
+  `UPDATE ai_traders
+      SET investment_horizon = CASE
+        WHEN strategy IN ('VALUE', 'CONSERVATIVE') THEN 'LONG'
+        WHEN strategy = 'AGGRESSIVE' THEN 'SHORT'
+        ELSE 'SWING'
+      END
+    WHERE trader_kind = 'RULE'`,
+  `CREATE TABLE IF NOT EXISTS virtual_instrument_states (
+    instrument_id text PRIMARY KEY REFERENCES instruments(id) ON DELETE CASCADE,
+    fundamental_value numeric(24, 8) NOT NULL,
+    quality_score numeric(8, 6) NOT NULL,
+    growth_score numeric(8, 6) NOT NULL,
+    leverage_risk numeric(8, 6) NOT NULL,
+    cyclicality numeric(8, 6) NOT NULL,
+    float_shares numeric(28, 4) NOT NULL,
+    ownership_premium numeric(12, 8) NOT NULL DEFAULT 0,
+    ownership_concentration numeric(12, 8) NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS virtual_instrument_states_updated_index
+    ON virtual_instrument_states (updated_at)`,
+  `CREATE TABLE IF NOT EXISTS virtual_market_regimes (
+    scope_type text NOT NULL,
+    scope_key text NOT NULL,
+    phase text NOT NULL CHECK (phase IN ('BULL', 'NEUTRAL', 'BEAR')),
+    drift_per_day numeric(12, 8) NOT NULL,
+    volatility_multiplier numeric(8, 6) NOT NULL,
+    started_at timestamptz NOT NULL,
+    next_transition_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (scope_type, scope_key)
+  )`,
+  `CREATE TABLE IF NOT EXISTS virtual_market_events (
+    id uuid PRIMARY KEY,
+    kind text NOT NULL,
+    scope_type text NOT NULL,
+    scope_key text NOT NULL,
+    headline text NOT NULL,
+    fundamental_impact numeric(12, 8) NOT NULL,
+    sentiment_impact numeric(12, 8) NOT NULL,
+    volatility_multiplier numeric(8, 6) NOT NULL,
+    starts_at timestamptz NOT NULL,
+    ends_at timestamptz NOT NULL,
+    decay_half_life_ms bigint NOT NULL,
+    applied_fraction numeric(8, 6) NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS virtual_market_events_lifecycle_index
+    ON virtual_market_events (starts_at, ends_at)`,
+  `CREATE INDEX IF NOT EXISTS virtual_market_events_scope_index
+    ON virtual_market_events (scope_type, scope_key)`,
+];
+
 export async function migrateDatabase(client: PGlite): Promise<void> {
   await client.exec(INITIAL_SCHEMA);
   for (const statement of ACCOUNT_LEDGER_MIGRATION) {
@@ -729,6 +805,11 @@ export async function migrateDatabase(client: PGlite): Promise<void> {
     client,
     14,
     REGISTRATION_EMAIL_VERIFICATION_MIGRATION,
+  );
+  await runVersionedMigration(
+    client,
+    15,
+    MARKET_STATE_AND_RULE_AI_V2_MIGRATION,
   );
   await client.query(
     `INSERT INTO schema_migrations (version)

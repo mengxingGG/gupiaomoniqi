@@ -127,17 +127,14 @@ export class LlamaCppTradingClient implements LLMDecisionClient {
             temperature: this.config.temperature,
             max_tokens: this.config.maxOutputTokens,
             stream: false,
-            chat_template_kwargs: {
-              enable_thinking: false,
-            },
-            response_format: {
-              type: "json_schema",
-              json_schema: {
-                name: "virtual_stock_trade_decision",
-                strict: true,
-                schema: LLM_TRADE_DECISION_JSON_SCHEMA,
-              },
-            },
+            ...(this.config.jsonSchemaMode === "strict"
+              ? {
+                  chat_template_kwargs: {
+                    enable_thinking: false,
+                  },
+                }
+              : {}),
+            response_format: responseFormat(this.config.jsonSchemaMode),
           }),
         });
       } catch (error) {
@@ -172,6 +169,20 @@ export class LlamaCppTradingClient implements LLMDecisionClient {
       signal?.removeEventListener("abort", abortFromCaller);
     }
   }
+}
+
+function responseFormat(mode: LLMTradingConfig["jsonSchemaMode"]): object {
+  if (mode === "strict") {
+    return {
+      type: "json_schema",
+      json_schema: {
+        name: "virtual_stock_trade_decision",
+        strict: true,
+        schema: LLM_TRADE_DECISION_JSON_SCHEMA,
+      },
+    };
+  }
+  return { type: "json_object" };
 }
 
 function parseOpenAIResponse(responseText: string): unknown {

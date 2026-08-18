@@ -389,6 +389,36 @@ export const aiTraders = pgTable(
     totalTrades: integer("total_trades").notNull().default(0),
     winCount: integer("win_count").notNull().default(0),
     lossCount: integer("loss_count").notNull().default(0),
+    investmentHorizon: text("investment_horizon")
+      .notNull()
+      .default("SWING"),
+    conviction: numeric("conviction", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    thesisInstrumentId: text("thesis_instrument_id").references(
+      () => instruments.id,
+      { onDelete: "set null" },
+    ),
+    thesisScore: numeric("thesis_score", {
+      precision: 12,
+      scale: 8,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    thesisStartedAt: timestamp("thesis_started_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    minimumHoldUntil: timestamp("minimum_hold_until", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    lastSignalVersion: text("last_signal_version"),
     createdAt: timestamp("created_at", {
       withTimezone: true,
       mode: "date",
@@ -561,6 +591,12 @@ export const positions = pgTable(
     })
       .notNull()
       .default(0),
+    openedAt: timestamp("opened_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
     updatedAt: timestamp("updated_at", {
       withTimezone: true,
       mode: "date",
@@ -742,6 +778,169 @@ export const orders = pgTable(
     uniqueIndex("orders_portfolio_idempotency_unique").on(
       table.portfolioId,
       table.idempotencyKey,
+    ),
+  ],
+);
+
+export const virtualInstrumentStates = pgTable(
+  "virtual_instrument_states",
+  {
+    instrumentId: text("instrument_id")
+      .primaryKey()
+      .references(() => instruments.id, { onDelete: "cascade" }),
+    fundamentalValue: numeric("fundamental_value", {
+      precision: 24,
+      scale: 8,
+      mode: "number",
+    }).notNull(),
+    qualityScore: numeric("quality_score", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    }).notNull(),
+    growthScore: numeric("growth_score", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    }).notNull(),
+    leverageRisk: numeric("leverage_risk", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    }).notNull(),
+    cyclicality: numeric("cyclicality", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    }).notNull(),
+    floatShares: numeric("float_shares", {
+      precision: 28,
+      scale: 4,
+      mode: "number",
+    }).notNull(),
+    ownershipPremium: numeric("ownership_premium", {
+      precision: 12,
+      scale: 8,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    ownershipConcentration: numeric("ownership_concentration", {
+      precision: 12,
+      scale: 8,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("virtual_instrument_states_updated_index").on(table.updatedAt)],
+);
+
+export const virtualMarketRegimes = pgTable(
+  "virtual_market_regimes",
+  {
+    scopeType: text("scope_type").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    phase: text("phase").notNull(),
+    driftPerDay: numeric("drift_per_day", {
+      precision: 12,
+      scale: 8,
+      mode: "number",
+    }).notNull(),
+    volatilityMultiplier: numeric("volatility_multiplier", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    }).notNull(),
+    startedAt: timestamp("started_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    nextTransitionAt: timestamp("next_transition_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "virtual_market_regimes_primary_key",
+      columns: [table.scopeType, table.scopeKey],
+    }),
+  ],
+);
+
+export const virtualMarketEvents = pgTable(
+  "virtual_market_events",
+  {
+    id: uuid("id").primaryKey(),
+    kind: text("kind").notNull(),
+    scopeType: text("scope_type").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    headline: text("headline").notNull(),
+    fundamentalImpact: numeric("fundamental_impact", {
+      precision: 12,
+      scale: 8,
+      mode: "number",
+    }).notNull(),
+    sentimentImpact: numeric("sentiment_impact", {
+      precision: 12,
+      scale: 8,
+      mode: "number",
+    }).notNull(),
+    volatilityMultiplier: numeric("volatility_multiplier", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    }).notNull(),
+    startsAt: timestamp("starts_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    endsAt: timestamp("ends_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    decayHalfLifeMs: bigint("decay_half_life_ms", { mode: "number" }).notNull(),
+    appliedFraction: numeric("applied_fraction", {
+      precision: 8,
+      scale: 6,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("virtual_market_events_lifecycle_index").on(
+      table.startsAt,
+      table.endsAt,
+    ),
+    index("virtual_market_events_scope_index").on(
+      table.scopeType,
+      table.scopeKey,
     ),
   ],
 );

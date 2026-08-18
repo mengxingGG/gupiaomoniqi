@@ -11,6 +11,7 @@ const llmTradingSchema = z
     baseUrl: z.string().trim().url(),
     modelId: z.string().trim().min(1).max(300),
     apiKey: z.string().default(""),
+    jsonSchemaMode: z.enum(["object", "strict"]).default("object"),
     agentCount: z.coerce.number().int().min(1).max(10).default(10),
     contextWindow: z.coerce
       .number()
@@ -82,6 +83,7 @@ export interface LLMTradingConfig {
   baseUrl: string;
   modelId: string;
   apiKey: string;
+  jsonSchemaMode: "object" | "strict";
   agentCount: number;
   contextWindow: number;
   requestTimeoutMs: number;

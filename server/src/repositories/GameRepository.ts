@@ -15,6 +15,11 @@ export interface InstrumentRecord extends Instrument {
   initialPrice: number;
   volatility: number;
   liquidity: number;
+  sourceInitialPrice?: number;
+  sourceVolume?: number;
+  sourceTurnover?: number;
+  totalMarketCap?: number | null;
+  circulatingMarketCap?: number | null;
 }
 
 export interface CandleRecord extends Candle {
@@ -52,6 +57,16 @@ export interface PositionRecord {
   availableQuantity: number;
   frozenQuantity: number;
   averageCostUsd: number;
+  openedAt?: string;
+}
+
+export type OwnershipActorKind = "PLAYER" | "RULE_AI" | "LLM_AI";
+
+export interface OwnershipPositionRecord extends PositionRecord {
+  portfolioId: string;
+  actorId: string;
+  actorKind: OwnershipActorKind;
+  initialCashUsd: number;
 }
 
 export interface CreateAccountCommit {
@@ -172,6 +187,13 @@ export interface AITraderRecord {
   winCount: number;
   lossCount: number;
   createdAt: string;
+  investmentHorizon?: "SHORT" | "SWING" | "LONG";
+  conviction?: number;
+  thesisInstrumentId?: string | null;
+  thesisScore?: number;
+  thesisStartedAt?: string | null;
+  minimumHoldUntil?: string | null;
+  lastSignalVersion?: string | null;
 }
 
 export interface AITraderDecisionRecord {
@@ -293,6 +315,7 @@ export interface GameRepository {
   getPortfolioByAccountId(accountId: string): PortfolioRecord | undefined;
   getPortfolioById(portfolioId: string): PortfolioRecord | undefined;
   listPositions(portfolioId: string): PositionRecord[];
+  listOwnershipPositions(): OwnershipPositionRecord[];
   getPosition(
     portfolioId: string,
     instrumentId: string,

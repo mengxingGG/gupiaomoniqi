@@ -14,6 +14,7 @@
     "baseUrl": "http://127.0.0.1:8080/v1",
     "modelId": "your-llama-cpp-model-id",
     "apiKey": "",
+    "jsonSchemaMode": "object",
     "agentCount": 10,
     "contextWindow": 32768,
     "requestTimeoutMs": 300000,

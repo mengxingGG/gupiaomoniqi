@@ -130,4 +130,118 @@ describe("AITradingService", () => {
       repository.listTransactions(cnTrader!.portfolioId),
     ).toHaveLength(0);
   });
+
+  it("长期 AI 会保存投资逻辑、在最短持有期内坚持有效观点，并在逻辑严重恶化时退出", async () => {
+    let now = new Date("2026-08-18T00:00:00.000Z");
+    let negative = false;
+    let signalVersion = 1;
+    const { repository, tradeService } = await createTestHarness({
+      registerAccount: false,
+      clock: () => now,
+    });
+    await repository.createAITraders([
+      {
+        portfolio: {
+          id: "10000000-0000-4000-8000-000000000001",
+          accountId: null,
+          mode: "VIRTUAL",
+          initialCashUsd: 1_000_000,
+          availableCashUsd: 1_000_000,
+          frozenCashUsd: 0,
+        },
+        trader: {
+          id: "20000000-0000-4000-8000-000000000001",
+          portfolioId: "10000000-0000-4000-8000-000000000001",
+          name: "长期价值测试 AI",
+          strategy: "VALUE",
+          psychology: "耐心型",
+          riskLevel: 5,
+          activityLevel: 5,
+          preferredMarket: "US",
+          traderKind: "RULE",
+          personaKey: null,
+          isActive: true,
+          lastActionAt: null,
+          nextActionAt: now.toISOString(),
+          totalTrades: 0,
+          winCount: 0,
+          lossCount: 0,
+          createdAt: now.toISOString(),
+        },
+      },
+    ]);
+    const signalSource = {
+      getMarketSignal(instrumentId: string) {
+        const quote = repository.getQuote(instrumentId)!;
+        const preferred = instrumentId === "us-aapl";
+        const direction = negative && preferred ? -1 : preferred ? 1 : -0.2;
+        return {
+          instrumentId,
+          fundamentalValue: quote.currentPrice * (1 + direction * 0.15),
+          targetPrice: quote.currentPrice * (1 + direction * 0.15),
+          fundamentalGap: direction * 0.15,
+          expectedDailyReturn: direction * 0.02,
+          marketDriftPerDay: direction * 0.002,
+          sectorDriftPerDay: direction * 0.002,
+          ownershipPremium: preferred ? 0.02 : 0,
+          ownershipConcentration: 0.01,
+          eventSentiment: negative && preferred ? -0.08 : 0,
+          volatilityMultiplier: 1,
+          qualityScore: preferred ? 0.9 : 0.4,
+          growthScore: preferred ? 0.7 : 0,
+          leverageRisk: preferred ? 0.2 : 0.6,
+          signalVersion: String(signalVersion),
+        };
+      },
+      getMarketSignalVersion: () => String(signalVersion),
+    };
+    const listQuotesSpy = vi.spyOn(repository, "listQuotes");
+    const service = new AITradingService(
+      repository,
+      tradeService,
+      () => 0.1,
+      () => now,
+      true,
+      signalSource,
+    );
+
+    const entry = await service.runRound(1);
+    expect(entry.buyVolume).toBeGreaterThan(0);
+    expect(listQuotesSpy).toHaveBeenCalledTimes(1);
+    expect(repository.getAITrader("20000000-0000-4000-8000-000000000001"))
+      .toMatchObject({
+        investmentHorizon: "LONG",
+        thesisInstrumentId: "us-aapl",
+        conviction: expect.any(Number),
+        thesisStartedAt: now.toISOString(),
+      });
+
+    const initialQuantity = repository.getPosition(
+      "10000000-0000-4000-8000-000000000001",
+      "us-aapl",
+    )!.quantity;
+    now = new Date(now.getTime() + 24 * 60 * 60_000);
+    const holdingRound = await service.runRound(1);
+    expect(holdingRound.sellVolume).toBe(0);
+    expect(listQuotesSpy).toHaveBeenCalledTimes(1);
+    expect(
+      repository.getPosition(
+        "10000000-0000-4000-8000-000000000001",
+        "us-aapl",
+      )!.quantity,
+    ).toBeGreaterThanOrEqual(initialQuantity);
+
+    negative = true;
+    signalVersion += 1;
+    now = new Date(now.getTime() + 60 * 60_000);
+    const exit = await service.runRound(1);
+    expect(exit.sellVolume).toBeGreaterThan(0);
+    expect(listQuotesSpy).toHaveBeenCalledTimes(2);
+    expect(
+      repository.getPosition(
+        "10000000-0000-4000-8000-000000000001",
+        "us-aapl",
+      ),
+    ).toBeUndefined();
+  });
 });

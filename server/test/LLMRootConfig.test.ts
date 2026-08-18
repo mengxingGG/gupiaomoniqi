@@ -60,6 +60,7 @@ describe("RootConfig LLM 配置", () => {
     expect(result.llmTrading).toMatchObject({
       baseUrl: "http://127.0.0.1:8080/v1",
       modelId: "local-qwen",
+      jsonSchemaMode: "object",
       agentCount: 10,
       contextWindow: 32_768,
       requestTimeoutMs: 300_000,

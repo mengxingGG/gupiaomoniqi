@@ -21,6 +21,7 @@ import {
   TradeError,
   type TradeService,
 } from "../services/TradeService.js";
+import type { VirtualMarketSignal } from "../virtual-market/MarketStateService.js";
 
 const STRATEGIES: AITraderStrategy[] = [
   "BALANCED",
@@ -35,7 +36,6 @@ const MARKETS: StockMarket[] = ["CN", "HK", "US", "UK"];
 const STARTUP_RECOVERY_DELAY_MS = 1_000;
 const STARTUP_RECOVERY_WINDOW_MS = 60_000;
 const TRADERS_PER_EVENT_LOOP_YIELD = 8;
-const BUY_CANDIDATE_SAMPLE_SIZE = 48;
 const PSYCHOLOGIES = [
   "纪律型",
   "耐心型",
@@ -50,6 +50,26 @@ interface TradeDecision {
   side: "BUY" | "SELL";
   instrumentId: string;
   quantity: number;
+}
+
+interface RuleAIMarketSignalSource {
+  getMarketSignal(instrumentId: string): VirtualMarketSignal | undefined;
+  getMarketSignalVersion(): string;
+}
+
+interface RuleAIFactor {
+  instrument: InstrumentRecord;
+  quote: Quote;
+  signal: VirtualMarketSignal | null;
+  intradayPosition: number;
+  dailyChange: number;
+  volumeIntensity: number;
+  liquidityScore: number;
+}
+
+interface ScoredRuleAICandidate {
+  factor: RuleAIFactor;
+  score: number;
 }
 
 export interface AIRoundResult {
@@ -72,6 +92,10 @@ export class AITradingService {
   >();
   #tradersLoaded = false;
   #startupScheduleRecovered = false;
+  readonly #factorByInstrument = new Map<string, RuleAIFactor>();
+  readonly #rankings = new Map<string, ScoredRuleAICandidate[]>();
+  #factorVersion = "uninitialized";
+  #sourceSignalVersion: string | null = null;
 
   constructor(
     private readonly repository: GameRepository,
@@ -79,6 +103,7 @@ export class AITradingService {
     private readonly random: () => number = Math.random,
     private readonly clock: () => Date = () => new Date(),
     private readonly enabled = true,
+    private readonly marketSignals?: RuleAIMarketSignalSource,
   ) {}
 
   async ensurePopulation(targetCount: number): Promise<number> {
@@ -142,6 +167,13 @@ export class AITradingService {
           winCount: 0,
           lossCount: 0,
           createdAt: now.toISOString(),
+          investmentHorizon: investmentHorizon(strategy),
+          conviction: 0,
+          thesisInstrumentId: null,
+          thesisScore: 0,
+          thesisStartedAt: null,
+          minimumHoldUntil: null,
+          lastSignalVersion: null,
         },
       });
     }
@@ -161,6 +193,8 @@ export class AITradingService {
     if (!this.enabled) {
       return this.#finishRound(0, [], now, Date.now() - startedAt);
     }
+
+    this.#refreshFactorSnapshot();
 
     const due = this.#listAITraders()
       .filter(
@@ -339,6 +373,10 @@ export class AITradingService {
   }
 
   #decide(trader: AITraderRecord): TradeDecision | null {
+    const horizon =
+      trader.investmentHorizon ?? investmentHorizon(trader.strategy);
+    trader.investmentHorizon = horizon;
+    trader.lastSignalVersion = this.#factorVersion;
     const portfolio = this.repository.getPortfolioById(
       trader.portfolioId,
     );
@@ -379,50 +417,49 @@ export class AITradingService {
         ? 0
         : portfolio.availableCashUsd / totalAssetsUsd;
     const maxPositions =
-      trader.strategy === "CONSERVATIVE"
-        ? 5
-        : trader.strategy === "AGGRESSIVE"
+      horizon === "LONG"
+        ? 6
+        : horizon === "SHORT"
           ? 10
           : 8;
-    const buyProbability = Math.min(
-      0.88,
-      0.18 +
-        cashRatio * 0.55 +
-        trader.activityLevel * 0.018,
-    );
 
     if (
       positions.length >= maxPositions ||
       portfolio.availableCashUsd < 10 ||
-      this.random() > buyProbability
+      cashRatio < 0.04
     ) {
       return null;
     }
 
     const candidate = this.#selectBuy(trader, positions);
+    const threshold = entryThreshold(horizon, trader.strategy);
 
-    if (!candidate) {
+    if (!candidate || candidate.score < threshold) {
       return null;
     }
 
-    const quote = this.repository.getQuote(candidate.id);
-
-    if (!quote) {
-      return null;
-    }
+    const { instrument, quote } = candidate.factor;
+    const conviction = clamp(
+      0.3 + (candidate.score - threshold) * 0.32,
+      0.2,
+      0.95,
+    );
 
     const priceUsd = quotePriceToUsd(
       quote.currentPrice,
       quote.quoteCurrency,
     );
-    const allocation = allocationRange(trader.strategy);
+    const allocation = allocationRange(trader.strategy, horizon);
     const allocationRatio =
-      allocation[0] +
-      this.random() * (allocation[1] - allocation[0]);
+      allocation[0] + conviction * (allocation[1] - allocation[0]);
     const maxSinglePositionRatio =
-      trader.strategy === "AGGRESSIVE" ? 0.35 : 0.22;
+      horizon === "LONG"
+        ? 0.3
+        : trader.strategy === "AGGRESSIVE"
+          ? 0.35
+          : 0.22;
     const currentPosition = positions.find(
-      (position) => position.instrumentId === candidate.id,
+      (position) => position.instrumentId === instrument.id,
     );
     const currentValueUsd =
       (currentPosition?.quantity ?? 0) * priceUsd;
@@ -437,23 +474,43 @@ export class AITradingService {
       Math.max(0, portfolio.availableCashUsd - 1),
     );
     const budgetLots = Math.floor(
-      budgetUsd / (priceUsd * candidate.lotSize * 1.001),
+      budgetUsd / (priceUsd * instrument.lotSize * 1.001),
     );
     const participationLots = Math.max(
       1,
       Math.floor(
-        (candidate.liquidity *
+        (instrument.liquidity *
           (0.55 + trader.riskLevel * 0.22)) /
-          candidate.lotSize,
+          instrument.lotSize,
       ),
     );
     const lots = Math.min(budgetLots, participationLots);
 
+    if (lots > 0) {
+      const now = this.clock();
+      const continuingThesis =
+        trader.thesisInstrumentId === instrument.id;
+      trader.conviction = conviction;
+      trader.thesisInstrumentId = instrument.id;
+      trader.thesisScore = candidate.score;
+      trader.thesisStartedAt = continuingThesis
+        ? (trader.thesisStartedAt ?? now.toISOString())
+        : now.toISOString();
+      trader.minimumHoldUntil = continuingThesis
+        ? (trader.minimumHoldUntil ??
+          new Date(
+            now.getTime() + minimumHoldDurationMs(horizon),
+          ).toISOString())
+        : new Date(
+            now.getTime() + minimumHoldDurationMs(horizon),
+          ).toISOString();
+    }
+
     return lots > 0
       ? {
           side: "BUY",
-          instrumentId: candidate.id,
-          quantity: lots * candidate.lotSize,
+          instrumentId: instrument.id,
+          quantity: lots * instrument.lotSize,
         }
       : null;
   }
@@ -462,6 +519,9 @@ export class AITradingService {
     trader: AITraderRecord,
     positions: PositionRecord[],
   ): TradeDecision | null {
+    const now = this.clock();
+    const horizon =
+      trader.investmentHorizon ?? investmentHorizon(trader.strategy);
     const sellable = positions
       .map((position) => {
         const instrument = this.repository.getInstrumentById(
@@ -485,12 +545,44 @@ export class AITradingService {
           ((currentPriceUsd - position.averageCostUsd) /
             position.averageCostUsd) *
           100;
+        const factor =
+          this.#factorByInstrument.get(instrument.id) ??
+          this.#buildFactor(instrument, quote);
+        const score = this.#score(trader.strategy, factor);
+        const signal = factor.signal;
+        const riskStop =
+          profitPercent <= -(7 + trader.riskLevel * 0.75);
+        const severeSignal =
+          score <= -0.65 ||
+          (signal?.eventSentiment ?? 0) <= -0.045;
+        const thesisInvalid = score <= exitThreshold(horizon);
+        const overvalued =
+          (signal?.fundamentalGap ??
+            (quote.previousClose - quote.currentPrice) /
+              Math.max(quote.currentPrice, 0.0001)) <= -0.12 &&
+          score < 0.12;
+        const adaptiveProfitTarget =
+          horizon === "SHORT" ? 5 : horizon === "SWING" ? 12 : 25;
+        const matureProfit =
+          profitPercent >= adaptiveProfitTarget && score < 0.2;
+        const minimumHoldActive =
+          trader.thesisInstrumentId === instrument.id &&
+          trader.minimumHoldUntil !== null &&
+          trader.minimumHoldUntil !== undefined &&
+          new Date(trader.minimumHoldUntil).getTime() > now.getTime();
 
         return {
           position,
           instrument,
           quote,
           profitPercent,
+          score,
+          riskStop,
+          severeSignal,
+          thesisInvalid,
+          overvalued,
+          matureProfit,
+          minimumHoldActive,
         };
       })
       .filter(
@@ -501,6 +593,13 @@ export class AITradingService {
           instrument: InstrumentRecord;
           quote: Quote;
           profitPercent: number;
+          score: number;
+          riskStop: boolean;
+          severeSignal: boolean;
+          thesisInvalid: boolean;
+          overvalued: boolean;
+          matureProfit: boolean;
+          minimumHoldActive: boolean;
         } => item !== null,
       );
 
@@ -508,35 +607,47 @@ export class AITradingService {
       return null;
     }
 
-    const stopLoss = -(4 + trader.riskLevel * 0.8);
-    const takeProfit = 3.5 + trader.riskLevel * 1.25;
-    const forced = sellable
+    const exits = sellable
       .filter(
         (item) =>
-          item.profitPercent <= stopLoss ||
-          item.profitPercent >= takeProfit,
+          item.riskStop ||
+          item.severeSignal ||
+          (!item.minimumHoldActive &&
+            (item.thesisInvalid || item.overvalued || item.matureProfit)),
       )
       .sort(
         (left, right) =>
-          Math.abs(right.profitPercent) -
-          Math.abs(left.profitPercent),
-      )[0];
-    const discretionaryProbability =
-      0.05 +
-      sellable.length * 0.025 +
-      trader.activityLevel * 0.008;
+          left.score - right.score ||
+          left.profitPercent - right.profitPercent,
+      );
+    const selected = exits[0];
 
-    if (!forced && this.random() > discretionaryProbability) {
+    if (!selected) {
+      const thesis = trader.thesisInstrumentId
+        ? sellable.find(
+            (item) => item.instrument.id === trader.thesisInstrumentId,
+          )
+        : undefined;
+      if (thesis) {
+        trader.thesisScore = thesis.score;
+        trader.conviction = clamp(
+          (trader.conviction ?? 0.5) * 0.75 +
+            normalizedConviction(thesis.score) * 0.25,
+          0.1,
+          0.95,
+        );
+      }
       return null;
     }
 
-    const selected =
-      forced ?? this.#rankSellCandidate(trader, sellable);
-    const sellRatio = forced
-      ? selected.profitPercent <= stopLoss
+    const sellRatio =
+      selected.riskStop || selected.severeSignal
         ? 1
-        : 0.5 + this.random() * 0.5
-      : 0.25 + this.random() * 0.5;
+        : horizon === "LONG"
+          ? 0.35
+          : horizon === "SWING"
+            ? 0.55
+            : 0.8;
     const lots = Math.max(
       1,
       Math.floor(
@@ -549,6 +660,14 @@ export class AITradingService {
       lots * selected.instrument.lotSize,
     );
 
+    if (trader.thesisInstrumentId === selected.instrument.id) {
+      trader.conviction = 0;
+      trader.thesisInstrumentId = null;
+      trader.thesisScore = 0;
+      trader.thesisStartedAt = null;
+      trader.minimumHoldUntil = null;
+    }
+
     return {
       side: "SELL",
       instrumentId: selected.instrument.id,
@@ -559,56 +678,49 @@ export class AITradingService {
   #selectBuy(
     trader: AITraderRecord,
     positions: PositionRecord[],
-  ): InstrumentRecord | undefined {
-    const held = new Map(
-      positions.map((position) => [
-        position.instrumentId,
-        position,
-      ]),
-    );
+  ): ScoredRuleAICandidate | undefined {
+    const held = new Set(positions.map((position) => position.instrumentId));
+    if (trader.thesisInstrumentId) {
+      const factor = this.#factorByInstrument.get(trader.thesisInstrumentId);
+      if (factor) {
+        const score =
+          this.#score(trader.strategy, factor) -
+          (held.has(factor.instrument.id) ? 0.45 : 0);
+        if (
+          score >=
+          entryThreshold(
+            trader.investmentHorizon ??
+              investmentHorizon(trader.strategy),
+            trader.strategy,
+          ) *
+            0.85
+        ) {
+          return { factor, score };
+        }
+      }
+    }
     const preferred = this.random() < 0.72;
-    const pool = this.#candidatePool(
+    const candidates = this.#rankedCandidates(
+      trader.strategy,
       preferred ? trader.preferredMarket : undefined,
     );
-    const candidates = sampleCandidates(
-      pool,
-      BUY_CANDIDATE_SAMPLE_SIZE,
-      this.random,
-    )
-      .map((instrument) => {
-        const quote = this.repository.getQuote(instrument.id);
-
-        if (!quote) {
-          return null;
-        }
-
-        return {
-          instrument,
-          score:
-            this.#buyScore(trader.strategy, instrument, quote) +
-            (held.has(instrument.id) ? -0.35 : 0) +
-            (this.random() - 0.5) * 0.3,
-        };
-      })
-      .filter(
-        (
-          item,
-        ): item is {
-          instrument: InstrumentRecord;
-          score: number;
-        } => item !== null,
-      )
-      .sort((left, right) => right.score - left.score);
-    const shortlist = candidates.slice(0, 12);
+    const shortlist = candidates
+      .slice(0, 24)
+      .map((candidate) => ({
+        factor: candidate.factor,
+        score:
+          candidate.score -
+          (held.has(candidate.factor.instrument.id) ? 0.45 : 0),
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 8);
 
     if (shortlist.length === 0) {
       return undefined;
     }
 
-    const pick = Math.floor(
-      Math.pow(this.random(), 2) * shortlist.length,
-    );
-    return shortlist[pick]?.instrument;
+    const pick = Math.floor(Math.pow(this.random(), 2.5) * shortlist.length);
+    return shortlist[pick];
   }
 
   #candidatePool(market?: StockMarket): InstrumentRecord[] {
@@ -631,94 +743,181 @@ export class AITradingService {
       : this.#tradableInstruments;
   }
 
-  #buyScore(
-    strategy: AITraderStrategy,
+  #buildFactor(
     instrument: InstrumentRecord,
     quote: Quote,
-  ): number {
+  ): RuleAIFactor {
     const range = Math.max(
       quote.highPrice - quote.lowPrice,
       quote.currentPrice * 0.001,
     );
     const intradayPosition =
       (quote.currentPrice - quote.lowPrice) / range;
-    const change = quote.changePercent / 5;
     const volumeIntensity = Math.log1p(
       quote.volume / Math.max(instrument.liquidity, 1),
     );
     const liquidityScore = Math.log10(
       Math.max(instrument.liquidity, 10),
     );
+    return {
+      instrument,
+      quote,
+      signal: this.marketSignals?.getMarketSignal(instrument.id) ?? null,
+      intradayPosition,
+      dailyChange: quote.changePercent / 100,
+      volumeIntensity,
+      liquidityScore,
+    };
+  }
+
+  #score(strategy: AITraderStrategy, factor: RuleAIFactor): number {
+    const {
+      instrument,
+      signal,
+      intradayPosition,
+      dailyChange,
+      volumeIntensity,
+      liquidityScore,
+    } = factor;
+    const expected = signal?.expectedDailyReturn ?? 0;
+    const fundamentalGap =
+      signal?.fundamentalGap ??
+      (factor.quote.previousClose - factor.quote.currentPrice) /
+        Math.max(factor.quote.currentPrice, 0.0001);
+    const ownership = signal?.ownershipPremium ?? 0;
+    const event = signal?.eventSentiment ?? 0;
+    const quality = signal
+      ? signal.qualityScore - signal.leverageRisk * 0.55
+      : 0;
 
     switch (strategy) {
       case "MOMENTUM":
-        return change * 1.4 + intradayPosition + volumeIntensity * 0.18;
+        return (
+          dailyChange * 22 +
+          expected * 70 +
+          intradayPosition * 0.32 +
+          event * 8 +
+          volumeIntensity * 0.06 +
+          liquidityScore * 0.04
+        );
       case "CONTRARIAN":
-        return -change * 1.25 + (1 - intradayPosition) * 0.8;
+        return (
+          -dailyChange * 16 +
+          fundamentalGap * 3.2 +
+          expected * 65 +
+          (1 - intradayPosition) * 0.22
+        );
       case "VALUE":
         return (
-          ((quote.previousClose - quote.currentPrice) /
-            quote.previousClose) *
-            25 +
-          liquidityScore * 0.12 -
-          instrument.volatility * 80
+          fundamentalGap * 5 +
+          expected * 80 +
+          quality * 0.45 +
+          ownership * 2.5 +
+          liquidityScore * 0.035 -
+          instrument.volatility * 35
         );
       case "TECHNICAL":
         return (
-          intradayPosition * 1.15 +
-          volumeIntensity * 0.32 +
-          Math.sign(change) * 0.2
+          dailyChange * 13 +
+          expected * 55 +
+          intradayPosition * 0.28 +
+          volumeIntensity * 0.1 +
+          Math.sign(dailyChange) * 0.08 +
+          liquidityScore * 0.035
         );
       case "CONSERVATIVE":
         return (
-          liquidityScore * 0.38 -
-          Math.abs(change) * 0.65 -
-          instrument.volatility * 120
+          expected * 65 +
+          fundamentalGap * 2 +
+          quality * 0.5 +
+          ownership * 1.5 +
+          liquidityScore * 0.055 -
+          Math.abs(dailyChange) * 8 -
+          instrument.volatility * 60
         );
       case "AGGRESSIVE":
         return (
-          Math.abs(change) * 0.95 +
-          volumeIntensity * 0.28 +
-          instrument.volatility * 100
+          expected * 75 +
+          Math.abs(dailyChange) * 12 +
+          event * 10 +
+          volumeIntensity * 0.1 +
+          instrument.volatility * 55 +
+          liquidityScore * 0.025
         );
       default:
         return (
-          change * 0.35 +
-          intradayPosition * 0.3 +
-          liquidityScore * 0.2
+          expected * 75 +
+          fundamentalGap * 2.4 +
+          dailyChange * 7 +
+          ownership * 2 +
+          event * 6 +
+          intradayPosition * 0.12 +
+          liquidityScore * 0.045
         );
     }
   }
 
-  #rankSellCandidate(
-    trader: AITraderRecord,
-    candidates: Array<{
-      position: PositionRecord;
-      instrument: InstrumentRecord;
-      quote: Quote;
-      profitPercent: number;
-    }>,
-  ) {
-    return [...candidates].sort((left, right) => {
-      if (
-        trader.strategy === "MOMENTUM" ||
-        trader.strategy === "AGGRESSIVE"
-      ) {
-        return left.profitPercent - right.profitPercent;
-      }
+  #rankedCandidates(
+    strategy: AITraderStrategy,
+    market?: StockMarket,
+  ): ScoredRuleAICandidate[] {
+    const key = `${strategy}:${market ?? "ALL"}`;
+    const cached = this.#rankings.get(key);
+    if (cached) {
+      return cached;
+    }
+    const ranked = this.#candidatePool(market)
+      .map((instrument) => this.#factorByInstrument.get(instrument.id))
+      .filter((factor): factor is RuleAIFactor => factor !== undefined)
+      .map((factor) => ({
+        factor,
+        score: this.#score(strategy, factor),
+      }))
+      .sort((left, right) => right.score - left.score);
+    this.#rankings.set(key, ranked);
+    return ranked;
+  }
 
-      if (
-        trader.strategy === "VALUE" ||
-        trader.strategy === "CONSERVATIVE"
-      ) {
-        return right.profitPercent - left.profitPercent;
+  #refreshFactorSnapshot(): void {
+    const sourceSignalVersion =
+      this.marketSignals?.getMarketSignalVersion() ?? null;
+    if (
+      sourceSignalVersion !== null &&
+      sourceSignalVersion === this.#sourceSignalVersion
+    ) {
+      return;
+    }
+    const quoteVersion = this.repository.listQuotes().reduce(
+      (version, quote) => ({
+        latest:
+          quote.updatedAt > version.latest
+            ? quote.updatedAt
+            : version.latest,
+        checksum:
+          version.checksum +
+          quote.currentPrice * 31 +
+          quote.changePercent * 17 +
+          quote.volume * 0.000001,
+      }),
+      { latest: "", checksum: 0 },
+    );
+    const version = `${this.marketSignals?.getMarketSignalVersion() ?? "legacy"}:${quoteVersion.latest}:${quoteVersion.checksum.toFixed(6)}`;
+    if (version === this.#factorVersion) {
+      return;
+    }
+    this.#factorByInstrument.clear();
+    this.#rankings.clear();
+    for (const instrument of this.#candidatePool()) {
+      const quote = this.repository.getQuote(instrument.id);
+      if (quote) {
+        this.#factorByInstrument.set(
+          instrument.id,
+          this.#buildFactor(instrument, quote),
+        );
       }
-
-      return (
-        Math.abs(right.profitPercent) -
-        Math.abs(left.profitPercent)
-      );
-    })[0]!;
+    }
+    this.#factorVersion = version;
+    this.#sourceSignalVersion = sourceSignalVersion;
   }
 
   #nextTraderState(
@@ -726,24 +925,26 @@ export class AITradingService {
     transaction: Transaction | undefined,
     now: Date,
   ): AITraderRecord {
-    const strategyMultiplier =
-      trader.strategy === "CONSERVATIVE"
-        ? 1.8
-        : trader.strategy === "AGGRESSIVE" ||
-            trader.strategy === "MOMENTUM"
-          ? 0.65
-          : 1;
-    const baseDelayMs =
-      (6_000 + (10 - trader.activityLevel) * 4_000) *
-      strategyMultiplier;
-    const jitterMs = this.random() * 12_000;
+    const horizon =
+      trader.investmentHorizon ?? investmentHorizon(trader.strategy);
+    const [minimumDelayMs, maximumDelayMs] =
+      horizon === "SHORT"
+        ? [15_000, 60_000]
+        : horizon === "SWING"
+          ? [2 * 60_000, 8 * 60_000]
+          : [15 * 60_000, 45 * 60_000];
+    const activityScale = clamp(1.2 - trader.activityLevel * 0.035, 0.75, 1.1);
+    const nextDelayMs =
+      (minimumDelayMs +
+        this.random() * (maximumDelayMs - minimumDelayMs)) *
+      activityScale;
     const realized = transaction?.realizedProfitUsd;
 
     return {
       ...trader,
       lastActionAt: now.toISOString(),
       nextActionAt: new Date(
-        now.getTime() + baseDelayMs + jitterMs,
+        now.getTime() + nextDelayMs,
       ).toISOString(),
       totalTrades: trader.totalTrades + (transaction ? 1 : 0),
       winCount:
@@ -894,39 +1095,16 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
-function sampleCandidates<T>(
-  pool: readonly T[],
-  maximum: number,
-  random: () => number,
-): T[] {
-  if (pool.length <= maximum) {
-    return [...pool];
-  }
-
-  const start = Math.floor(random() * pool.length);
-  let stride = Math.max(1, Math.floor(random() * (pool.length - 1)) + 1);
-  while (greatestCommonDivisor(stride, pool.length) !== 1) {
-    stride = stride === pool.length - 1 ? 1 : stride + 1;
-  }
-
-  return Array.from(
-    { length: maximum },
-    (_, index) => pool[(start + index * stride) % pool.length]!,
-  );
-}
-
-function greatestCommonDivisor(left: number, right: number): number {
-  let a = left;
-  let b = right;
-  while (b !== 0) {
-    [a, b] = [b, a % b];
-  }
-  return Math.abs(a);
-}
-
 function allocationRange(
   strategy: AITraderStrategy,
+  horizon: "SHORT" | "SWING" | "LONG",
 ): [number, number] {
+  if (horizon === "SHORT") {
+    return strategy === "AGGRESSIVE" ? [0.1, 0.2] : [0.05, 0.13];
+  }
+  if (horizon === "LONG") {
+    return strategy === "CONSERVATIVE" ? [0.12, 0.22] : [0.16, 0.3];
+  }
   switch (strategy) {
     case "CONSERVATIVE":
       return [0.08, 0.16];
@@ -939,6 +1117,51 @@ function allocationRange(
     default:
       return [0.12, 0.24];
   }
+}
+
+function investmentHorizon(
+  strategy: AITraderStrategy,
+): "SHORT" | "SWING" | "LONG" {
+  if (strategy === "VALUE" || strategy === "CONSERVATIVE") {
+    return "LONG";
+  }
+  if (strategy === "AGGRESSIVE") {
+    return "SHORT";
+  }
+  return "SWING";
+}
+
+function entryThreshold(
+  horizon: "SHORT" | "SWING" | "LONG",
+  strategy: AITraderStrategy,
+): number {
+  const horizonThreshold =
+    horizon === "SHORT" ? 0.16 : horizon === "LONG" ? 0.08 : 0.12;
+  return strategy === "CONSERVATIVE"
+    ? horizonThreshold + 0.08
+    : horizonThreshold;
+}
+
+function exitThreshold(horizon: "SHORT" | "SWING" | "LONG"): number {
+  return horizon === "SHORT" ? -0.04 : horizon === "LONG" ? -0.22 : -0.12;
+}
+
+function minimumHoldDurationMs(
+  horizon: "SHORT" | "SWING" | "LONG",
+): number {
+  return horizon === "SHORT"
+    ? 20 * 60_000
+    : horizon === "SWING"
+      ? 8 * 60 * 60_000
+      : 3 * 24 * 60 * 60_000;
+}
+
+function normalizedConviction(score: number): number {
+  return 1 / (1 + Math.exp(-score * 1.8));
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function strategyLabel(strategy: AITraderStrategy): string {
