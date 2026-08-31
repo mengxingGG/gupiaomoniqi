@@ -74,12 +74,15 @@ describe("shutdown request validation", () => {
   });
 
   it("pins the control file to the configured runtime directory", () => {
+    // Windows 路径（C:\...）在非 Windows 平台不是绝对路径，
+    // resolveRuntimeControlPath 会按平台语义返回 null。
+    const isWindows = process.platform === "win32";
     const runtimeDirectory = "C:\\ProgramData\\gupiaomoniqi\\runtime";
     const expectedPath = `${runtimeDirectory}\\app-shutdown-request.json`;
 
     expect(
       resolveShutdownRequestPath(runtimeDirectory, expectedPath),
-    ).toBe(expectedPath);
+    ).toBe(isWindows ? expectedPath : null);
     expect(
       resolveShutdownRequestPath(
         runtimeDirectory,
@@ -98,7 +101,9 @@ describe("shutdown request validation", () => {
         `${runtimeDirectory}\\app-shutdown-confirmation.json`,
       ),
     ).toBe(
-      `${runtimeDirectory}\\app-shutdown-confirmation.json`,
+      isWindows
+        ? `${runtimeDirectory}\\app-shutdown-confirmation.json`
+        : null,
     );
     expect(
       resolveShutdownConfirmationPath(

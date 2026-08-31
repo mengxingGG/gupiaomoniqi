@@ -1083,14 +1083,17 @@ describe("真实行情完整模块", () => {
   });
 
   it("同一身份拥有两个隔离账本，真实价交易、签到和礼包码均幂等", async () => {
+    // 用动态日期而非固定日期：固定日期会使 30 天 session 在真实时间
+    // 超过有效期后被 MemoryGameRepository.getSession 判为过期（时间炸弹）。
+    const now = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const virtual = await createTestHarness({
       registerAccount: false,
-      clock: () => new Date("2026-07-28T12:00:00.000Z"),
+      clock: () => now,
     });
     const { repository: realRepository } =
       await createRealRepository();
     await realRepository.upsertProviderPage(
-      providerPage("2026-07-28T12:00:00.000Z"),
+      providerPage(now.toISOString()),
       "seed-sweep",
     );
     const context = await createApplication({
@@ -1098,7 +1101,7 @@ describe("真实行情完整模块", () => {
       realRepository,
       realSyncEnabled: false,
       aiEnabled: false,
-      clock: () => new Date("2026-07-28T12:00:00.000Z"),
+      clock: () => now,
     });
 
     try {
@@ -1241,7 +1244,8 @@ describe("真实行情完整模块", () => {
   });
 
   it("真实行情限价单冻结资金并在新报价穿价后成交", async () => {
-    const now = new Date("2026-07-28T12:00:00.000Z");
+    // 动态日期：避免固定日期 session 过期导致的时间炸弹。
+    const now = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const virtual = await createTestHarness({
       registerAccount: false,
       clock: () => now,

@@ -124,6 +124,17 @@ export const REAL_MARKET_CONFIG = {
     10_000,
     30 * 60_000,
   ),
+  /**
+   * 非交易时段（盘前/盘后/午休/周末）的行情新鲜度阈值。
+   * 非交易时段价格不活跃，放宽阈值避免非热门股票因全量扫描
+   * 周期（默认 5 分钟）大于严格窗口（默认 2 分钟）而周期性无法交易。
+   */
+  quoteMaximumReceiveAgeOffHoursMs: boundedInteger(
+    process.env.REAL_MARKET_QUOTE_MAX_AGE_OFFHOURS_MS,
+    30 * 60_000,
+    10_000,
+    24 * 60 * 60_000,
+  ),
 } as const;
 
 export const LOAD_CONTROLLER_CONFIG = {
