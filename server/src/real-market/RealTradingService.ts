@@ -24,9 +24,11 @@ import {
   roundUnitPrice,
 } from "../domain/money.js";
 import { RealMarketRepository } from "./RealMarketRepository.js";
+import { quoteMaximumAgeMs } from "./tradingHours.js";
 import type {
   RealPortfolioRecord,
   RealPositionRecord,
+  RealQuoteRecord,
 } from "./types.js";
 
 export class RealTradeError extends Error {
@@ -46,8 +48,23 @@ export class RealTradingService {
   constructor(
     private readonly repository: RealMarketRepository,
     private readonly quoteMaximumReceiveAgeMs: number,
+    private readonly quoteMaximumReceiveAgeOffHoursMs: number,
     private readonly clock: () => Date = () => new Date(),
   ) {}
+
+  /**
+   * 行情新鲜度阈值：交易时段内严格要求（quoteMaximumReceiveAgeMs），
+   * 盘前/盘后/午休/周末等非交易时段放宽（quoteMaximumReceiveAgeOffHoursMs），
+   * 避免非热门股票因全量扫描周期大于严格窗口而周期性无法交易。
+   */
+  #quoteMaximumAgeFor(quote: RealQuoteRecord): number {
+    return quoteMaximumAgeMs(
+      quote.market,
+      this.clock(),
+      this.quoteMaximumReceiveAgeMs,
+      this.quoteMaximumReceiveAgeOffHoursMs,
+    );
+  }
 
   async getSnapshot(
     accountId: string,
@@ -503,7 +520,7 @@ export class RealTradingService {
         }
         if (
           this.clock().getTime() - new Date(quote.receivedAt).getTime() >
-          this.quoteMaximumReceiveAgeMs
+          this.#quoteMaximumAgeFor(quote)
         ) {
           continue;
         }
@@ -549,7 +566,7 @@ export class RealTradingService {
     }
     if (
       now.getTime() - new Date(quote.receivedAt).getTime() >
-      this.quoteMaximumReceiveAgeMs
+      this.#quoteMaximumAgeFor(quote)
     ) {
       throw new RealTradeError(
         "REAL_QUOTE_STALE",
@@ -849,7 +866,7 @@ export class RealTradingService {
     }
     if (
       now.getTime() - new Date(quote.receivedAt).getTime() >
-      this.quoteMaximumReceiveAgeMs
+      this.#quoteMaximumAgeFor(quote)
     ) {
       throw new RealTradeError(
         "REAL_QUOTE_STALE",

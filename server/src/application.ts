@@ -431,6 +431,7 @@ export async function createApplication(
   const realTradingService = new RealTradingService(
     realRepository,
     realRuntimeConfig.quoteMaximumReceiveAgeMs,
+    realRuntimeConfig.quoteMaximumReceiveAgeOffHoursMs,
     clock,
   );
   let loadController: SystemLoadController | null = null;

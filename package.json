@@ -28,8 +28,8 @@
     "dev:app": "concurrently -n server,web -c blue,green --kill-others \"tsx server/src/index.ts\" \"vite --config web/vite.config.ts\"",
     "dev:server": "tsx watch server/src/index.ts",
     "dev:web": "vite --config web/vite.config.ts",
-    "build": "tsc -p server/tsconfig.json && tsc -b web/tsconfig.json && vite build --config web/vite.config.ts",
-    "typecheck": "tsc -p server/tsconfig.json && tsc -b web/tsconfig.json",
+    "build": "tsc -p shared/tsconfig.json && tsc -p server/tsconfig.json && tsc -b web/tsconfig.json && vite build --config web/vite.config.ts",
+    "typecheck": "tsc -p shared/tsconfig.json && tsc -p server/tsconfig.json && tsc -b web/tsconfig.json",
     "test": "vitest run --config server/vitest.config.ts",
     "test:watch": "vitest --config server/vitest.config.ts",
     "start": "node server/dist/index.js"
