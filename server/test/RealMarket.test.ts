@@ -167,7 +167,7 @@ describe("real market database migrations", () => {
     const versions = await client.query<{ version: number }>(
       `SELECT version FROM schema_migrations ORDER BY version`,
     );
-    expect(versions.rows.map(({ version }) => version)).toEqual([1, 2, 3, 4]);
+    expect(versions.rows.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5]);
   });
 });
 

@@ -30,8 +30,11 @@ import com.mengxinggg.gupiaomoniqi.model.Watchlist
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 interface StockRepository {
+    suspend fun assistantRequest(path: String = "", method: String = "GET", body: JSONObject? = null): JSONObject =
+        throw UnsupportedOperationException("AI 助手不可用")
     var baseUrl: String
     val hasSession: Boolean
 
@@ -133,6 +136,8 @@ class DefaultStockRepository(
     private val apiClient: ApiClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : StockRepository {
+    override suspend fun assistantRequest(path: String, method: String, body: JSONObject?): JSONObject =
+        io { apiClient.assistantRequest(path, method, body) }
     constructor(context: Context) : this(
         ApiClient(
             EncryptedTokenStore(context.applicationContext),

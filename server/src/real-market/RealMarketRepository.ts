@@ -50,6 +50,7 @@ interface InstrumentQuoteRow {
   raw_low_price: number | null;
   quote_source_updated_at: Date | string | null;
   received_at: Date | string | null;
+  data_provider: RealQuoteRecord["dataProvider"];
 }
 
 const PROVIDER_PAGE_WRITE_BATCH_SIZE = 25;
@@ -139,6 +140,10 @@ export class RealMarketRepository {
     return instrument?.isActive
       ? structuredClone(instrument)
       : undefined;
+  }
+
+  listInstrumentsForPage(market: StockMarket, page: number): RealInstrumentRecord[] {
+    return [...this.#instruments.values()].filter(i => i.isActive && i.market === market && i.sourcePage === page).map(i => structuredClone(i));
   }
 
   getQuote(instrumentId: string): RealQuoteRecord | undefined {
@@ -340,6 +345,7 @@ export class RealMarketRepository {
     providerPage: ProviderPage,
     sweepId: string | null,
     hotInstrumentIds: ReadonlySet<string> = new Set(),
+    supplemental = false,
   ): Promise<void> {
     const items = uniqueProviderPageItems(providerPage.items);
     for (const item of items) {
@@ -378,6 +384,7 @@ export class RealMarketRepository {
       .map(({ quote }) => quote)
       .filter((quote): quote is RealQuoteRecord => quote !== null)
       .map((quote) => ({
+        data_provider: quote.dataProvider ?? "EASTMONEY",
         instrument_id: quote.instrumentId,
         current_price: quote.currentPrice,
         previous_close: quote.previousClose,
@@ -414,7 +421,7 @@ export class RealMarketRepository {
 
     await this.client.transaction(async (transaction) => {
       for (const batch of chunked(
-        instruments,
+        supplemental ? [] : instruments,
         PROVIDER_PAGE_WRITE_BATCH_SIZE,
       )) {
         await transaction.query(
@@ -475,14 +482,14 @@ export class RealMarketRepository {
              high_price, low_price, volume, amount, change_amount,
              change_percent, raw_current_price, raw_previous_close,
              raw_open_price, raw_high_price, raw_low_price,
-             source_updated_at, received_at
+             source_updated_at, received_at, data_provider
            )
            SELECT x.instrument_id, x.current_price, x.previous_close,
                   x.open_price, x.high_price, x.low_price, x.volume,
                   x.amount, x.change_amount, x.change_percent,
                   x.raw_current_price, x.raw_previous_close,
                   x.raw_open_price, x.raw_high_price, x.raw_low_price,
-                  x.source_updated_at, x.received_at
+                  x.source_updated_at, x.received_at, x.data_provider
              FROM jsonb_to_recordset($1::jsonb) AS x(
                instrument_id text, current_price float8,
                previous_close float8, open_price float8,
@@ -491,7 +498,7 @@ export class RealMarketRepository {
                change_percent float8, raw_current_price float8,
                raw_previous_close float8, raw_open_price float8,
                raw_high_price float8, raw_low_price float8,
-               source_updated_at timestamptz, received_at timestamptz
+               source_updated_at timestamptz, received_at timestamptz, data_provider text
              )
            ON CONFLICT (instrument_id) DO UPDATE SET
              current_price = excluded.current_price,
@@ -509,7 +516,8 @@ export class RealMarketRepository {
              raw_high_price = excluded.raw_high_price,
              raw_low_price = excluded.raw_low_price,
              source_updated_at = excluded.source_updated_at,
-             received_at = excluded.received_at
+             received_at = excluded.received_at,
+             data_provider = excluded.data_provider
            WHERE excluded.source_updated_at >=
                  real_quotes.source_updated_at`,
           [JSON.stringify(batch)],
@@ -523,6 +531,9 @@ export class RealMarketRepository {
         false,
         PROVIDER_PAGE_WRITE_BATCH_SIZE,
       );
+      if (supplemental && quotes.length) await transaction.query(
+        "UPDATE real_instruments SET is_tradable = true WHERE id = ANY($1::text[])", [quotes.map(q => q.instrument_id)],
+      );
       await upsertCandleRows(
         transaction,
         minuteCandles,
@@ -530,7 +541,7 @@ export class RealMarketRepository {
         PROVIDER_PAGE_WRITE_BATCH_SIZE,
       );
 
-      await transaction.query(
+      if (!supplemental) await transaction.query(
         `INSERT INTO real_provider_pages (
            market, page, page_size, provider_total, row_count,
            last_sweep_id, last_attempt_at, last_success_at,
@@ -564,10 +575,14 @@ export class RealMarketRepository {
     });
 
     for (const { instrument, quote } of items) {
-      this.#instruments.set(
+      if (!supplemental) this.#instruments.set(
         instrument.id,
         structuredClone(instrument),
       );
+      if (supplemental && quote) {
+        const stored = this.#instruments.get(instrument.id);
+        if (stored) this.#instruments.set(instrument.id, { ...stored, isTradable: true });
+      }
 
       if (quote) {
         const current = this.#quotes.get(quote.instrumentId);
@@ -583,6 +598,8 @@ export class RealMarketRepository {
       }
     }
 
+    // 补报价不改变东方财富的页码、清单完整性或分片成功状态。
+    if (supplemental) return;
     const state: ProviderPageState = {
       market: providerPage.market,
       page: providerPage.page,
@@ -617,6 +634,19 @@ export class RealMarketRepository {
         false,
         CANDLE_WRITE_BATCH_SIZE,
       );
+    });
+  }
+
+  /** 单一股票、周期的区间原子替换，整组 OHLC 来自同一源。 */
+  async replaceHistoryWindow(candles: ProviderCandle[]): Promise<void> {
+    if (!candles.length) return;
+    const first = candles[0]!;
+    if (candles.some(c => c.instrumentId !== first.instrumentId || c.interval !== first.interval || c.source !== first.source)) throw new Error("历史区间不能混用标的或来源");
+    const sorted = [...candles].sort((a, b) => a.time.localeCompare(b.time));
+    await this.client.transaction(async transaction => {
+      await transaction.query("DELETE FROM real_candles WHERE instrument_id = $1 AND interval = $2 AND bucket_start >= $3 AND bucket_start <= $4",
+        [first.instrumentId, first.interval, sorted[0]!.time, sorted.at(-1)!.time]);
+      await upsertCandleRows(transaction, sorted, false, CANDLE_WRITE_BATCH_SIZE);
     });
   }
 
@@ -722,7 +752,7 @@ export class RealMarketRepository {
               q.raw_current_price::float8,
               q.raw_previous_close::float8, q.raw_open_price::float8,
               q.raw_high_price::float8, q.raw_low_price::float8,
-              q.source_updated_at AS quote_source_updated_at,
+              q.source_updated_at AS quote_source_updated_at, q.data_provider,
               q.received_at
          FROM real_instruments i
          LEFT JOIN real_quotes q ON q.instrument_id = i.id`,
@@ -777,6 +807,7 @@ export class RealMarketRepository {
           rawLowPrice: row.raw_low_price ?? row.current_price,
           updatedAt: toIso(row.quote_source_updated_at),
           receivedAt: toIso(row.received_at),
+          dataProvider: row.data_provider,
         });
       }
     }
@@ -1018,9 +1049,9 @@ async function upsertCandleRows(
          )
        ON CONFLICT (instrument_id, interval, bucket_start)
        DO UPDATE SET
-         open = real_candles.open,
-         high = GREATEST(real_candles.high, excluded.high),
-         low = LEAST(real_candles.low, excluded.low),
+         open = ${mergeVolume ? "real_candles.open" : "excluded.open"},
+         high = ${mergeVolume ? "GREATEST(real_candles.high, excluded.high)" : "excluded.high"},
+         low = ${mergeVolume ? "LEAST(real_candles.low, excluded.low)" : "excluded.low"},
          close = excluded.close,
          volume = ${mergeVolume
           ? "real_candles.volume + excluded.volume"

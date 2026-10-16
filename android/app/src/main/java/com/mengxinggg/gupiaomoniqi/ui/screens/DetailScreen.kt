@@ -1,5 +1,6 @@
 package com.mengxinggg.gupiaomoniqi.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,11 +12,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.ui.unit.sp
+import com.mengxinggg.gupiaomoniqi.ui.components.FineIcon
+import com.mengxinggg.gupiaomoniqi.ui.components.FineSymbol
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -93,24 +105,27 @@ fun DetailScreen(
     val stock = requireNotNull(selectedStock)
 
     LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 22.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        modifier = modifier.fillMaxSize().background(Color.White),
+        contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 2.dp, bottom = 22.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onBack) { Text("← 返回") }
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = { onToggleWatchlist(stock.id) }) {
-                    Text(if (stock.id in state.watchlistIds) "★ 已自选" else "☆ 加自选")
+                IconButton(onClick = onBack) { FineIcon(FineSymbol.BACK, "返回行情") }
+                Column(Modifier.weight(1f)) {
+                    Text(stock.name, fontSize = 18.sp, lineHeight = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${marketLabel(stock.market)} ${stock.symbol} · ${stock.industry}", fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = { onToggleWatchlist(stock.id) }, colors = IconButtonDefaults.iconButtonColors(
+                    contentColor = if (stock.id in state.watchlistIds) Color(0xFFE27B39) else MaterialTheme.colorScheme.onSurface,
+                )) {
+                    FineIcon(FineSymbol.STAR, if (stock.id in state.watchlistIds) "移除自选" else "加入自选")
                 }
             }
         }
-        item { ModeNotice(state.mode) }
-        item { StockHeading(stock = stock, state = state) }
         if (state.detailError != null) {
             item {
                 Text(
@@ -122,23 +137,14 @@ fun DetailScreen(
         }
         item { QuoteSummary(stock = stock, state = state) }
         item {
-            SectionTitle(
-                title = "价格走势",
-                caption = if (state.mode == UiMarketMode.REAL) {
-                    "真实行情记录 · 不生成缺失数据"
-                } else {
-                    "服务端数据库记录"
-                },
-            )
-        }
-        item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(UiChartRange.entries, key = { it.name }) { range ->
-                    FilterChip(
-                        selected = state.chartRange == range,
-                        onClick = { onRangeChange(range) },
-                        label = { Text(range.label) },
-                    )
+                    TextButton(onClick = { onRangeChange(range) }, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp)) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(range.label, color = if (state.chartRange == range) Color(0xFFE27B39) else Color(0xFF59616A), fontSize = 14.sp, lineHeight = 22.sp)
+                            Box(Modifier.width(22.dp).height(2.dp).background(if (state.chartRange == range) Color(0xFFE27B39) else Color.Transparent))
+                        }
+                    }
                 }
             }
         }
@@ -170,16 +176,12 @@ fun DetailScreen(
             }
         }
         item {
-            OrderBookPanel(
-                state = state,
-                stock = stock,
-            )
-        }
-        item {
-            PositionPanel(
-                position = state.selectedPosition,
-                state = state,
-            )
+            var detailTab by rememberSaveable { mutableStateOf("盘口") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("盘口", "我的持仓").forEach { tab -> FilterChip(selected = detailTab == tab, onClick = { detailTab = tab }, label = { Text(tab) }) }
+            }
+            if (detailTab == "盘口") OrderBookPanel(state = state, stock = stock)
+            else PositionPanel(position = state.selectedPosition, state = state)
         }
         item {
             StockFacts(stock = stock, mode = state.mode)
@@ -188,126 +190,51 @@ fun DetailScreen(
 }
 
 @Composable
-private fun StockHeading(stock: StockUi, state: AppUiState) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                MarketBadge(stock.market)
-                Spacer(Modifier.width(11.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        stock.name,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Black,
-                    )
-                    Text(
-                        "${marketLabel(stock.market)} · ${stock.symbol} · ${stock.industry}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    formatQuoteMoney(stock, stock.currentPrice, state.displayCurrency),
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Black,
-                )
-                Column(horizontalAlignment = Alignment.End) {
-                    MovementText(
-                        value = stock.changePercent,
-                        text = formatPercent(stock.changePercent),
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    MovementText(
-                        value = stock.changeAmount,
-                        text = formatQuoteMoney(
-                            stock,
-                            stock.changeAmount,
-                            state.displayCurrency,
-                            signed = true,
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun QuoteSummary(stock: StockUi, state: AppUiState) {
-    Card {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                QuoteStat(
-                    label = "今开",
-                    value = formatQuoteMoney(stock, stock.openPrice, state.displayCurrency),
-                    modifier = Modifier.weight(1f),
-                )
-                QuoteStat(
-                    label = "昨收",
-                    value = formatQuoteMoney(stock, stock.previousClose, state.displayCurrency),
-                    modifier = Modifier.weight(1f),
-                )
+    val entries = listOf(
+        "今开" to formatQuoteMoney(stock, stock.openPrice, state.displayCurrency),
+        "最高" to formatQuoteMoney(stock, stock.highPrice, state.displayCurrency),
+        "最低" to formatQuoteMoney(stock, stock.lowPrice, state.displayCurrency),
+        "昨收" to formatQuoteMoney(stock, stock.previousClose, state.displayCurrency),
+        "成交量" to formatCompactNumber(stock.volume),
+        "每手" to "${stock.lotSize}股",
+    )
+    val price = formatQuoteMoney(stock, stock.currentPrice, state.displayCurrency)
+    val updateTime = runCatching { java.time.Instant.parse(stock.updatedAt).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")) }.getOrDefault(stock.updatedAt)
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp)) {
+        val compact = maxWidth >= 310.dp && LocalDensity.current.fontScale <= 1.15f
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.then(if (compact) Modifier.width(112.dp) else Modifier.weight(1f))) {
+                    Text(price, fontSize = if (price.length > 9) 17.sp else 26.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold,
+                        color = if (stock.changePercent > 0) GainRed else if (stock.changePercent < 0) LossGreen else MaterialTheme.colorScheme.onSurface)
+                    MovementText(stock.changePercent, formatPercent(stock.changePercent), style = MaterialTheme.typography.labelMedium)
+                    MovementText(stock.changeAmount, formatQuoteMoney(stock, stock.changeAmount, state.displayCurrency, signed = true), style = MaterialTheme.typography.labelSmall)
+                }
+                if (compact) Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    entries.chunked(2).forEach { pair -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        pair.forEach { (label, value) -> QuoteStat(label, value, Modifier.weight(1f)) }
+                    } }
+                }
             }
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                QuoteStat(
-                    label = "最高",
-                    value = formatQuoteMoney(stock, stock.highPrice, state.displayCurrency),
-                    modifier = Modifier.weight(1f),
-                )
-                QuoteStat(
-                    label = "最低",
-                    value = formatQuoteMoney(stock, stock.lowPrice, state.displayCurrency),
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                QuoteStat(
-                    label = "成交量",
-                    value = formatCompactNumber(stock.volume),
-                    modifier = Modifier.weight(1f),
-                )
-                QuoteStat(
-                    label = "每手 / 结算",
-                    value = "${stock.lotSize} 股 · ${stock.settlementCycle}",
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            if (!compact) entries.chunked(2).forEach { pair -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                pair.forEach { (label, value) -> QuoteStat(label, value, Modifier.weight(1f)) }
+            } }
+            Text((if (state.mode == UiMarketMode.REAL) "真实行情 · 模拟交易" else "虚拟市场 · 模拟交易") + " · ${state.displayCurrency.name} · ${stock.settlementCycle} · $updateTime",
+                fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (state.mode == UiMarketMode.REAL && stock.dataProvider in listOf("TENCENT", "SINA")) Text(
+                "报价补缺：${if (stock.dataProvider == "TENCENT") "腾讯" else "新浪"} · 时间为来源行情时间，可能延迟",
+                fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
 
 @Composable
-private fun QuoteStat(
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier = modifier) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.labelMedium,
-        )
-        Text(
-            value,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            fontWeight = FontWeight.Bold,
-            style = MaterialTheme.typography.bodyLarge,
-        )
+private fun QuoteStat(label: String, value: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, lineHeight = 16.sp)
+        Text(value, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, fontSize = 11.sp, lineHeight = 16.sp)
     }
 }
 
@@ -321,7 +248,7 @@ private fun OrderBookPanel(
             modifier = Modifier.padding(15.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SectionTitle(title = "五档盘口", caption = "买卖队列快照")
+            SectionTitle(title = "五档盘口", caption = if (state.mode == UiMarketMode.REAL) "真实盘口 · 聚合快照" else "模拟盘口 · 聚合快照")
             val book = state.orderBook
             when {
                 book == null && state.detailLoading -> {

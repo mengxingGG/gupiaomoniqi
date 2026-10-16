@@ -59,6 +59,10 @@ fun MarketChart(
     displayCurrency: UiDisplayCurrency,
     modifier: Modifier = Modifier,
 ) {
+    if (range != UiChartRange.INTRADAY && candles.isNotEmpty()) {
+        CandlestickChart(candles, range, quoteCurrency, displayCurrency, modifier)
+        return
+    }
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),

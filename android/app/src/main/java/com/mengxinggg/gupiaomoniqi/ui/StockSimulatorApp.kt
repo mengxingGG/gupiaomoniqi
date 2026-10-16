@@ -5,6 +5,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -13,6 +17,13 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.mengxinggg.gupiaomoniqi.ui.components.AssistantSheet
+import com.mengxinggg.gupiaomoniqi.ui.components.AssistantManagementSheet
+import com.mengxinggg.gupiaomoniqi.ui.components.AssistantOrb
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -46,6 +57,10 @@ fun StockSimulatorApp() {
     val factory = remember(repository) { AppViewModel.Factory(repository) }
     val viewModel: AppViewModel = viewModel(factory = factory)
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var assistantOpen by rememberSaveable { mutableStateOf(false) }
+    var assistantManagementOpen by rememberSaveable { mutableStateOf(false) }
+    var assistantStatus by remember { mutableStateOf("idle") }
+    LaunchedEffect(state.account?.username) { assistantOpen = false; assistantManagementOpen = false; assistantStatus = "idle" }
     val updateManager = remember(context.applicationContext) {
         AppUpdateManager(context.applicationContext)
     }
@@ -127,6 +142,7 @@ fun StockSimulatorApp() {
     }
 
     StockSimulatorTheme {
+        Box(Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
                 if (state.screen != AppScreen.AUTH) {
@@ -248,6 +264,20 @@ fun StockSimulatorApp() {
             }
         }
 
+        if (state.screen != AppScreen.AUTH && state.tradeSheet == null) {
+            AssistantOrb(status = assistantStatus,
+                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(start = 10.dp, end = 10.dp, top = 100.dp, bottom = 100.dp),
+                onClick = { if (state.account == null) viewModel.openAuth() else assistantOpen = true })
+        }
+        }
+        key(state.account?.username) {
+            if (state.account != null && assistantManagementOpen) AssistantManagementSheet(repository = repository,
+                onDismiss = { assistantManagementOpen = false; viewModel.openSettings() })
+            if (state.account != null) AssistantSheet(visible = assistantOpen, repository = repository,
+                mode = state.mode.name, instrumentId = if (state.screen == AppScreen.DETAIL) state.selectedStock?.id else null,
+                onStatusChange = { assistantStatus = it }, onDismiss = { assistantOpen = false })
+        }
+
         if (state.tradeSheet != null) {
             TradeSheet(
                 state = state,
@@ -265,6 +295,10 @@ fun StockSimulatorApp() {
                 currentUrl = state.serverUrl,
                 updateState = updateState,
                 onDismiss = viewModel::closeSettings,
+                onAssistantSettings = {
+                    viewModel.closeSettings()
+                    if (state.account == null) viewModel.openAuth() else assistantManagementOpen = true
+                },
                 onUpdateAction = {
                     if (updateState.downloadedApkPath != null) {
                         updateManager.requestInstallAgain()

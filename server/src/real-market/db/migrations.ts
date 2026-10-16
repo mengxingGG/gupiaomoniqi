@@ -296,6 +296,10 @@ const REAL_MARKET_MIGRATIONS = [
         NOT NULL DEFAULT 0 CHECK (frozen_quantity >= 0);
     `,
   },
+  {
+    version: 5,
+    sql: `ALTER TABLE real_quotes ADD COLUMN IF NOT EXISTS data_provider TEXT NOT NULL DEFAULT 'EASTMONEY';`,
+  },
 ] as const;
 
 export async function migrateRealDatabase(

@@ -41,6 +41,8 @@ export class VirtualMarketEngine {
   readonly #pendingSignedTradeNotionalUsd = new Map<string, number>();
   readonly #instrumentsById = new Map<string, InstrumentRecord>();
   readonly #quotesById = new Map<string, Quote>();
+  // 微小订单流和噪声在内部累积，只有对外报价按最小价格单位取整。
+  readonly #unroundedPrices = new Map<string, number>();
   readonly marketState: MarketStateService;
   #lastTickAtMs: number | null = null;
 
@@ -172,6 +174,7 @@ export class VirtualMarketEngine {
     );
     const timestamp = tickAt.toISOString();
     const currentMarketFactors = new Map<string, number>();
+    const currentSectorFactors = new Map<string, number>();
     const currentMarketDates = new Map<string, string>();
 
     for (const instrument of this.seeds) {
@@ -201,6 +204,16 @@ export class VirtualMarketEngine {
 
     await this.marketState.refresh([...this.#quotesById.values()], tickAt);
 
+    // 同一行业每轮只抽样一次，避免行业内股票数量及遍历顺序改变共同因子。
+    for (const instrument of this.seeds) {
+      const key = `${instrument.market}:${instrument.industry}`;
+      if (currentSectorFactors.has(key)) continue;
+      const factor = clamp((this.#sectorFactors.get(key) ?? 0) * 0.86 +
+        this.#centeredRandom(0.004 * microTimeScale * VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier), -0.0007, 0.0007);
+      this.#sectorFactors.set(key, factor);
+      currentSectorFactors.set(key, factor);
+    }
+
     const quotes = this.seeds.map((instrument) => {
       const current = this.#quotesById.get(instrument.id);
 
@@ -225,26 +238,14 @@ export class VirtualMarketEngine {
       const marketFactor = currentMarketFactors.get(marketKey) ?? 0;
 
       const sectorKey = `${marketKey}:${instrument.industry}`;
-      const previousSectorFactor =
-        this.#sectorFactors.get(sectorKey) ?? 0;
-      const sectorFactor = clamp(
-        previousSectorFactor * 0.86 +
-          this.#centeredRandom(
-            0.004 *
-              microTimeScale *
-              VIRTUAL_MARKET_IMPACT_RULES.naturalVolatilityMultiplier,
-          ),
-        -0.0007,
-        0.0007,
-      );
-      this.#sectorFactors.set(sectorKey, sectorFactor);
+      const sectorFactor = currentSectorFactors.get(sectorKey) ?? 0;
 
       const distanceFromClose =
         (working.currentPrice - working.previousClose) /
         working.previousClose;
       const meanReversion =
         -distanceFromClose *
-        (1 - Math.exp(-pricingElapsedMs / (6 * 60 * 60_000)));
+        (1 - Math.exp(-pricingElapsedMs / (18 * 60 * 60_000)));
       const marketSignal = this.marketState.getSignal(
         instrument.id,
         working.currentPrice,
@@ -340,13 +341,10 @@ export class VirtualMarketEngine {
         working.previousClose * (1 - GAME_RULES.dailyPriceLimitRate);
       const upperLimit =
         working.previousClose * (1 + GAME_RULES.dailyPriceLimitRate);
-      const nextPrice = roundPrice(
-        clamp(
-          working.currentPrice * (1 + changeRate),
-          lowerLimit,
-          upperLimit,
-        ),
-      );
+      const internalPrice = this.#unroundedPrices.get(instrument.id) ?? working.currentPrice;
+      const nextInternalPrice = clamp(internalPrice * (1 + changeRate), Math.max(0.01, lowerLimit), Math.max(0.01, upperLimit));
+      this.#unroundedPrices.set(instrument.id, nextInternalPrice);
+      const nextPrice = Math.max(0.01, roundPrice(nextInternalPrice));
       const backgroundVolume = Math.max(
         100,
         Math.round(
@@ -418,6 +416,10 @@ export class VirtualMarketEngine {
   #replaceQuoteCache(quotes: Quote[]): void {
     this.#quotesById.clear();
     for (const quote of quotes) {
+      const internal = this.#unroundedPrices.get(quote.instrumentId);
+      if (internal === undefined || roundPrice(internal) !== quote.currentPrice) {
+        this.#unroundedPrices.set(quote.instrumentId, quote.currentPrice);
+      }
       this.#quotesById.set(quote.instrumentId, structuredClone(quote));
     }
   }

@@ -434,7 +434,7 @@ export function redeemGiftCode(
   });
 }
 
-async function request<T>(
+export async function request<T>(
   path: string,
   init: RequestInit = {},
   authenticated = true,

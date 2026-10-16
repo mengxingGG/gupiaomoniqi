@@ -50,7 +50,7 @@ export class RealMarketDetailService {
     );
     const selected = source.slice(-limitForRange(range));
     const hasProviderHistory = selected.some(
-      (candle) => candle.source === "REAL_PROVIDER_HISTORY",
+      (candle) => candle.source === "REAL_PROVIDER_HISTORY" || candle.source === "REAL_TENCENT_HISTORY",
     );
     const summarizedError = providerError
       ? summarizeHistoryError(providerError)
@@ -63,7 +63,7 @@ export class RealMarketDetailService {
           "该市场暂未返回历史数据；系统不会生成虚假 K 线"
         : !hasProviderHistory && providerError
           ? `历史接口暂不可用，当前仅展示本地持续记录的真实快照：${summarizedError}`
-          : null;
+          : selected.some(c => c.source === "REAL_TENCENT_HISTORY") ? "东方财富历史暂缺，已按本股票与周期补取腾讯前复权历史" : null;
 
     return {
       instrumentId,

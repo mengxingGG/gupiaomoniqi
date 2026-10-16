@@ -584,14 +584,14 @@ export class DatabaseGameRepository implements GameRepository {
     this.#sessions.set(session.tokenHash, structuredClone(session));
   }
 
-  getSession(tokenHash: string): SessionRecord | undefined {
+  getSession(tokenHash: string, now = Date.now()): SessionRecord | undefined {
     const session = this.#sessions.get(tokenHash);
 
     if (!session) {
       return undefined;
     }
 
-    if (new Date(session.expiresAt).getTime() <= Date.now()) {
+    if (new Date(session.expiresAt).getTime() <= now) {
       this.#sessions.delete(tokenHash);
       void this.connection.db
         .delete(sessions)

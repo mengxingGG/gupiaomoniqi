@@ -13,6 +13,7 @@ import {
   REAL_MARKETS,
 } from "./EastmoneyProvider.js";
 import { RealMarketRepository } from "./RealMarketRepository.js";
+import type { SupplementalMarketProvider } from "./SupplementalMarketProvider.js";
 import type {
   ProviderPage,
   ProviderPageDescriptor,
@@ -73,6 +74,7 @@ export class RealMarketRuntime {
   #lastError: string | null = null;
   #lastSweepFailedPages = 0;
   #hotPageCount = 0;
+  readonly #gapFill = { quotes: 0, histories: 0, orderBooks: 0, lastSuccessAt: null as string | null };
   #effectiveSettings!: {
     concurrency: number;
     hotRefreshIntervalMs: number;
@@ -88,6 +90,7 @@ export class RealMarketRuntime {
       new Map(),
     private readonly clock: () => Date = () => new Date(),
     private readonly runtimeSettingsSource?: RuntimeSettingsSource,
+    private readonly supplemental?: Pick<SupplementalMarketProvider, "fetchQuotes" | "fetchHistory" | "fetchOrderBook">,
   ) {
     this.#effectiveSettings = {
       concurrency: this.config.concurrency,
@@ -213,6 +216,7 @@ export class RealMarketRuntime {
       hotPageCount: this.#hotPageCount,
       lastError: this.#lastError,
       markets,
+      gapFill: { ...this.#gapFill },
     };
   }
 
@@ -270,9 +274,19 @@ export class RealMarketRuntime {
         range,
         this.#abortController.signal,
       );
+      if (!candles.length) throw new Error("主源未返回有效历史");
       await this.repository.upsertCandles(candles);
       return { fetched: candles.length > 0, error: null };
     } catch (error) {
+      if (this.supplemental && !this.#stopped) {
+        try {
+          const candles = await this.supplemental.fetchHistory(instrument, range, this.#abortController.signal);
+          if (!candles.length) throw new Error("备用历史为空");
+          await this.repository.replaceHistoryWindow(candles);
+          this.#gapFill.histories++; this.#gapFill.lastSuccessAt = this.clock().toISOString();
+          return { fetched: true, error: null };
+        } catch { /* 备用源仍失败时保留原有历史，不补造行情。 */ }
+      }
       const message = errorMessage(error);
       this.#lastError = message;
       return { fetched: false, error: message };
@@ -290,10 +304,15 @@ export class RealMarketRuntime {
     this.touchInstrument(instrumentId, "DETAIL");
 
     try {
-      const orderBook = await this.provider.fetchOrderBook(
+      let orderBook;
+      try { orderBook = await this.provider.fetchOrderBook(
         instrument,
         this.#abortController.signal,
-      );
+      ); } catch (error) {
+        if (!this.supplemental || this.#stopped) throw error;
+        orderBook = await this.supplemental.fetchOrderBook(instrument, this.#abortController.signal);
+        this.#gapFill.orderBooks++; this.#gapFill.lastSuccessAt = this.clock().toISOString();
+      }
       const snapshot: OrderBookSnapshot = {
         instrumentId,
         quoteCurrency: quote.quoteCurrency,
@@ -310,6 +329,7 @@ export class RealMarketRuntime {
         })),
         updatedAt: orderBook.updatedAt,
         available: true,
+        notice: orderBook.dataProvider === "TENCENT" ? "东方财富盘口暂缺，当前为腾讯完整五档快照" : undefined,
       };
       this.#orderBookCache.set(instrumentId, {
         snapshot,
@@ -504,6 +524,7 @@ export class RealMarketRuntime {
     descriptor: ProviderPageDescriptor,
     sweepId: string,
   ): Promise<{ page: ProviderPage | null; error: string | null }> {
+    const requestedAt = this.clock().toISOString();
     let lastError = "未知错误";
     for (let attempt = 1; attempt <= 3 && !this.#stopped; attempt += 1) {
       try {
@@ -517,6 +538,7 @@ export class RealMarketRuntime {
           );
           this.#emitPage(page);
         });
+        await this.#repairQuoteGaps(descriptor, requestedAt, page);
         return { page, error: null };
       } catch (error) {
         lastError = errorMessage(error);
@@ -536,6 +558,7 @@ export class RealMarketRuntime {
       lastError,
       this.clock().toISOString(),
     );
+    await this.#repairQuoteGaps(descriptor, requestedAt);
     return { page: null, error: lastError };
   }
 
@@ -609,6 +632,7 @@ export class RealMarketRuntime {
               return;
             }
 
+            const requestedAt = this.clock().toISOString();
             try {
               const page = await this.#fetchRawPage(descriptor);
               await this.#enqueuePageWrite(async () => {
@@ -619,6 +643,7 @@ export class RealMarketRuntime {
                 );
                 this.#emitPage(page);
               });
+              await this.#repairQuoteGaps(descriptor, requestedAt, page, instrumentIds);
             } catch (error) {
               await this.repository.recordPageFailure(
                 descriptor.market,
@@ -627,6 +652,7 @@ export class RealMarketRuntime {
                 errorMessage(error),
                 this.clock().toISOString(),
               );
+              await this.#repairQuoteGaps(descriptor, requestedAt, undefined, instrumentIds);
             }
           }),
         );
@@ -647,6 +673,37 @@ export class RealMarketRuntime {
     });
     this.#writeQueue = operation.catch(() => undefined);
     return operation;
+  }
+
+  async #repairQuoteGaps(descriptor: ProviderPageDescriptor, requestedAt: string, primary?: ProviderPage, onlyIds?: ReadonlySet<string>) {
+    if (!this.supplemental || this.#stopped) return;
+    const candidates = primary ? primary.items.filter(item => !item.quote).map(item => item.instrument)
+      : this.repository.listInstrumentsForPage(descriptor.market, descriptor.page);
+    if (primary && primary.items.length < Math.min(primary.pageSize, Math.max(0, primary.providerTotal - (primary.page - 1) * primary.pageSize))) {
+      const present = new Set(primary.items.map(item => item.instrument.id));
+      candidates.push(...this.repository.listInstrumentsForPage(descriptor.market, descriptor.page).filter(i => !present.has(i.id)));
+    }
+    const missing = candidates.filter(i => (!onlyIds || onlyIds.has(i.id)) &&
+      (!this.repository.getQuote(i.id) || this.repository.getQuote(i.id)!.receivedAt < requestedAt));
+    if (!missing.length) return;
+    try {
+      const quotes = await this.supplemental.fetchQuotes(missing, this.#abortController.signal);
+      if (this.#stopped) return;
+      await this.#enqueuePageWrite(async () => {
+        // 网络等待期间主源可能已恢复：提交前再次核对，成功数据绝不被补缺覆盖。
+        const requested = new Map(missing.map(i => [i.id, i]));
+        const items = quotes.flatMap(quote => {
+          const instrument = requested.get(quote.instrumentId); const current = this.repository.getQuote(quote.instrumentId);
+          if (!instrument || current && (current.receivedAt >= requestedAt || current.updatedAt > quote.updatedAt)) return [];
+          return [{ instrument, quote }];
+        });
+        if (!items.length) return;
+        const page: ProviderPage = { ...descriptor, pageSize: this.config.pageSize, providerTotal: 0, durationMs: 0, receivedAt: this.clock().toISOString(), items };
+        await this.repository.upsertProviderPage(page, null, onlyIds ?? this.#hotIdsForPage(descriptor), true);
+        this.#gapFill.quotes += items.length; this.#gapFill.lastSuccessAt = page.receivedAt;
+        this.#emitPage(page);
+      });
+    } catch { /* 分片失败状态由主流程保留，备用失败不清空最后成功行情。 */ }
   }
 
   #scheduleHotRefresh(delayMs: number): void {
@@ -777,6 +834,7 @@ export class RealMarketRuntime {
       }
       emittedInstrumentIds.add(quote.instrumentId);
       quotes.push({
+        dataProvider: quote.dataProvider ?? "EASTMONEY",
         instrumentId: quote.instrumentId,
         symbol: quote.symbol,
         market: quote.market,

@@ -347,6 +347,7 @@ function strongerSource(
     MARKET_TICK: 2,
     REAL_PROVIDER_SNAPSHOT: 0,
     REAL_PROVIDER_HISTORY: 0,
+    REAL_TENCENT_HISTORY: 0,
   };
   return weight[right] > weight[left] ? right : left;
 }

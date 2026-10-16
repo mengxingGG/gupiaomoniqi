@@ -65,6 +65,8 @@ interface RuleAIFactor {
   dailyChange: number;
   volumeIntensity: number;
   liquidityScore: number;
+  trendReturn: number;
+  pullbackReturn: number;
 }
 
 interface ScoredRuleAICandidate {
@@ -96,6 +98,7 @@ export class AITradingService {
   readonly #rankings = new Map<string, ScoredRuleAICandidate[]>();
   #factorVersion = "uninitialized";
   #sourceSignalVersion: string | null = null;
+  readonly #tape = new Map<string, { at: number; volume: number; fast: number; slow: number; volumeRate: number }>();
 
   constructor(
     private readonly repository: GameRepository,
@@ -426,12 +429,12 @@ export class AITradingService {
     if (
       positions.length >= maxPositions ||
       portfolio.availableCashUsd < 10 ||
-      cashRatio < 0.04
+      cashRatio < cashReserveRatio(horizon)
     ) {
       return null;
     }
 
-    const candidate = this.#selectBuy(trader, positions);
+    const candidate = this.#selectBuy(trader, positions, totalAssetsUsd);
     const threshold = entryThreshold(horizon, trader.strategy);
 
     if (!candidate || candidate.score < threshold) {
@@ -471,7 +474,7 @@ export class AITradingService {
     const budgetUsd = Math.min(
       portfolio.availableCashUsd * allocationRatio,
       exposureRoomUsd,
-      Math.max(0, portfolio.availableCashUsd - 1),
+      Math.max(0, portfolio.availableCashUsd - totalAssetsUsd * cashReserveRatio(horizon) - 1),
     );
     const budgetLots = Math.floor(
       budgetUsd / (priceUsd * instrument.lotSize * 1.001),
@@ -563,8 +566,12 @@ export class AITradingService {
           score < 0.12;
         const adaptiveProfitTarget =
           horizon === "SHORT" ? 5 : horizon === "SWING" ? 12 : 25;
-        const matureProfit =
-          profitPercent >= adaptiveProfitTarget && score < 0.2;
+        // 分批兑现与回撤保护不再被长期偏高的买入评分阻止。
+        const pullbackFromHigh = (quote.highPrice - quote.currentPrice) / Math.max(quote.highPrice, 0.01);
+        const matureProfit = profitPercent >= adaptiveProfitTarget ||
+          (profitPercent >= adaptiveProfitTarget * 0.45 &&
+            pullbackFromHigh >= (horizon === "SHORT" ? 0.012 : horizon === "SWING" ? 0.025 : 0.05) &&
+            factor.pullbackReturn < 0);
         const minimumHoldActive =
           trader.thesisInstrumentId === instrument.id &&
           trader.minimumHoldUntil !== null &&
@@ -678,11 +685,20 @@ export class AITradingService {
   #selectBuy(
     trader: AITraderRecord,
     positions: PositionRecord[],
+    totalAssetsUsd: number,
   ): ScoredRuleAICandidate | undefined {
     const held = new Set(positions.map((position) => position.instrumentId));
+    const positionCap = (trader.investmentHorizon ?? investmentHorizon(trader.strategy)) === "LONG"
+      ? 0.3 : trader.strategy === "AGGRESSIVE" ? 0.35 : 0.22;
+    const hasRoom = (factor: RuleAIFactor) => {
+      const position = positions.find(p => p.instrumentId === factor.instrument.id);
+      const lotCost = quotePriceToUsd(factor.quote.currentPrice, factor.quote.quoteCurrency) * factor.instrument.lotSize;
+      const heldValue = (position?.quantity ?? 0) * quotePriceToUsd(factor.quote.currentPrice, factor.quote.quoteCurrency);
+      return totalAssetsUsd * positionCap - heldValue >= lotCost * 1.001;
+    };
     if (trader.thesisInstrumentId) {
       const factor = this.#factorByInstrument.get(trader.thesisInstrumentId);
-      if (factor) {
+      if (factor && hasRoom(factor)) {
         const score =
           this.#score(trader.strategy, factor) -
           (held.has(factor.instrument.id) ? 0.45 : 0);
@@ -700,10 +716,11 @@ export class AITradingService {
       }
     }
     const preferred = this.random() < 0.72;
-    const candidates = this.#rankedCandidates(
+    let candidates = this.#rankedCandidates(
       trader.strategy,
       preferred ? trader.preferredMarket : undefined,
-    );
+    ).filter(candidate => hasRoom(candidate.factor));
+    if (!candidates.length && preferred) candidates = this.#rankedCandidates(trader.strategy).filter(candidate => hasRoom(candidate.factor));
     const shortlist = candidates
       .slice(0, 24)
       .map((candidate) => ({
@@ -753,9 +770,17 @@ export class AITradingService {
     );
     const intradayPosition =
       (quote.currentPrice - quote.lowPrice) / range;
-    const volumeIntensity = Math.log1p(
-      quote.volume / Math.max(instrument.liquidity, 1),
-    );
+    const now = this.clock().getTime();
+    const previous = this.#tape.get(instrument.id);
+    const elapsed = Math.max(1_000, Math.min(6 * 60 * 60_000, now - (previous?.at ?? now)));
+    const fast = previous ? previous.fast + (quote.currentPrice - previous.fast) * (1 - Math.exp(-elapsed / (5 * 60_000))) : quote.currentPrice;
+    const slow = previous ? previous.slow + (quote.currentPrice - previous.slow) * (1 - Math.exp(-elapsed / (45 * 60_000))) : quote.currentPrice;
+    // 使用单位时间新增成交量，跨日归零不当作抛售，也不让日累计量永久抬高评分。
+    const volumeRate = previous && quote.volume >= previous.volume ? (quote.volume - previous.volume) / (elapsed / 1000) : 0;
+    const baseline = previous?.volumeRate ?? volumeRate;
+    const volumeIntensity = previous && baseline > 0 ? clamp(Math.log((1 + volumeRate) / (1 + baseline)), -1.5, 1.5) : 0;
+    this.#tape.set(instrument.id, { at: now, volume: quote.volume, fast, slow,
+      volumeRate: baseline + (volumeRate - baseline) * (1 - Math.exp(-elapsed / (20 * 60_000))) });
     const liquidityScore = Math.log10(
       Math.max(instrument.liquidity, 10),
     );
@@ -767,6 +792,8 @@ export class AITradingService {
       dailyChange: quote.changePercent / 100,
       volumeIntensity,
       liquidityScore,
+      trendReturn: clamp(Math.log(fast / slow), -0.05, 0.05),
+      pullbackReturn: clamp(Math.log(quote.currentPrice / fast), -0.05, 0.05),
     };
   }
 
@@ -778,6 +805,8 @@ export class AITradingService {
       dailyChange,
       volumeIntensity,
       liquidityScore,
+      trendReturn,
+      pullbackReturn,
     } = factor;
     const expected = signal?.expectedDailyReturn ?? 0;
     const fundamentalGap =
@@ -794,6 +823,7 @@ export class AITradingService {
       case "MOMENTUM":
         return (
           dailyChange * 22 +
+          trendReturn * 70 + pullbackReturn * 22 +
           expected * 70 +
           intradayPosition * 0.32 +
           event * 8 +
@@ -803,6 +833,7 @@ export class AITradingService {
       case "CONTRARIAN":
         return (
           -dailyChange * 16 +
+          -pullbackReturn * 50 +
           fundamentalGap * 3.2 +
           expected * 65 +
           (1 - intradayPosition) * 0.22
@@ -819,6 +850,7 @@ export class AITradingService {
       case "TECHNICAL":
         return (
           dailyChange * 13 +
+          trendReturn * 48 + pullbackReturn * 18 +
           expected * 55 +
           intradayPosition * 0.28 +
           volumeIntensity * 0.1 +
@@ -1174,4 +1206,9 @@ function strategyLabel(strategy: AITraderStrategy): string {
     CONSERVATIVE: "稳健",
     AGGRESSIVE: "进取",
   }[strategy];
+}
+
+/** 留出策略对应的现金缓冲，避免全部交易者一次建仓后失去再配置能力。 */
+function cashReserveRatio(horizon: "SHORT" | "SWING" | "LONG"): number {
+  return horizon === "SHORT" ? 0.14 : horizon === "SWING" ? 0.10 : 0.06;
 }

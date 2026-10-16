@@ -97,6 +97,7 @@ data class StockUi(
     val settlementCycle: String,
     val tradable: Boolean,
     val updatedAt: String,
+    val dataProvider: String? = null,
 )
 
 data class IndustryCountUi(

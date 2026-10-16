@@ -49,7 +49,7 @@ export function OrderBookPanel({
           <span className="eyebrow">ORDER BOOK</span>
           <h3>五档盘口</h3>
         </div>
-        <span className="simulation-chip real-chip">真实盘口</span>
+        <span className="simulation-chip real-chip">{orderBook.mode === "REAL" ? "真实盘口" : "模拟盘口"}</span>
       </div>
 
       <div className="order-book-heading">

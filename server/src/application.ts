@@ -57,6 +57,9 @@ import { ReloadableLLMTradingRuntime } from "./ai/ReloadableLLMTradingRuntime.js
 import { RepositoryLLMTradingPort } from "./ai/RepositoryLLMTradingPort.js";
 import { AppUpdateService } from "./app-update/AppUpdateService.js";
 import { registerAppUpdateRoutes } from "./app-update/registerAppUpdateRoutes.js";
+import { AssistantService } from "./assistant/AssistantService.js";
+import { AssistantError } from "./assistant/AssistantStore.js";
+import { searchWeb } from "./assistant/WebSearch.js";
 import {
   GAME_RULES,
   LOAD_CONTROLLER_CONFIG,
@@ -75,6 +78,7 @@ import type { DatabaseConnection } from "./db/client.js";
 import { openDatabase } from "./db/client.js";
 import { migrateDatabase } from "./db/migrations.js";
 import { EastmoneyProvider } from "./real-market/EastmoneyProvider.js";
+import { SupplementalMarketProvider } from "./real-market/SupplementalMarketProvider.js";
 import {
   openRealDatabase,
   type RealDatabaseConnection,
@@ -302,6 +306,7 @@ export interface ApplicationContext {
 }
 
 export interface CreateApplicationOptions {
+  assistantDirectory?: string;
   repository?: GameRepository;
   databaseConnection?: DatabaseConnection;
   logger?: boolean;
@@ -459,6 +464,7 @@ export async function createApplication(
         hotPagesPerRound: realRuntimeConfig.hotPagesPerRound,
         fullSweepTargetMs: realRuntimeConfig.fullSweepTargetMs,
       },
+    new SupplementalMarketProvider({ fetchImplementation: options.realFetchImplementation, requestTimeoutMs: realRuntimeConfig.requestTimeoutMs, clock }),
   );
   startupLog("initializing real runtime");
   await realRuntime.initialize();
@@ -772,6 +778,47 @@ export async function createApplication(
   });
 
   registerAppUpdateRoutes(app, appUpdateService);
+  const assistant = new AssistantService(options.assistantDirectory ?? fileURLToPath(new URL("../data/assistant", import.meta.url)), {
+    async read(accountId, scope, name, args) {
+      const source = scope.mode === "REAL" ? realRepository : repository;
+      const instrumentId = typeof args.instrumentId === "string" ? args.instrumentId : scope.instrumentId;
+      if (name === "market_quote") {
+        if (!instrumentId) throw new AssistantError("请提供标的 ID，或先通过筛选查找标的");
+        return { mode: scope.mode, instrument: source.getInstrumentById(instrumentId), quote: source.getQuote(instrumentId), asOf: clock().toISOString() };
+      }
+      if (name === "market_chart") {
+        if (!instrumentId) throw new AssistantError("请提供标的 ID");
+        const range = z.enum(["INTRADAY", "DAY", "MONTH", "YEAR"]).parse(args.range ?? "DAY");
+        const result = await (scope.mode === "REAL" ? realMarketDetailService : marketDetailService).getChart(instrumentId, range);
+        if (!result) throw new AssistantError("没有找到该标的的历史行情");
+        return { ...result, candles: result.candles.slice(-80), notice: `${result.notice ?? ""} 助手最多读取最后80根实际记录。` };
+      }
+      if (name === "screen_stocks") {
+        const input = z.object({ query: z.string().max(100).optional(), market: z.enum(["CN", "HK", "US", "UK"]).optional(), industry: z.string().max(100).optional(),
+          minChange: z.number().finite().optional(), maxChange: z.number().finite().optional(), minVolume: z.number().nonnegative().optional() }).parse(args);
+        const universe = source.listInstruments();
+        let withQuotes = 0;
+        const matches = universe.flatMap(i => {
+          const q = source.getQuote(i.id); if (!q) return []; withQuotes++;
+          if (input.query && !`${i.name} ${i.symbol}`.toLowerCase().includes(input.query.toLowerCase())) return [];
+          if (input.market && i.market !== input.market || input.industry && i.industry !== input.industry) return [];
+          if (input.minChange !== undefined && q.changePercent < input.minChange || input.maxChange !== undefined && q.changePercent > input.maxChange || input.minVolume !== undefined && q.volume < input.minVolume) return [];
+          return [{ id: i.id, name: i.name, symbol: i.symbol, market: i.market, industry: i.industry, quote: q }];
+        });
+        return { mode: scope.mode, filters: input, universe: universe.length, withQuotes, matched: matches.length, returned: Math.min(20, matches.length),
+          notice: "仅覆盖本服务已收录且有报价的股票，按涨跌幅降序返回前20项，不代表全市场或投资推荐", stocks: matches.sort((a,b) => b.quote.changePercent - a.quote.changePercent).slice(0,20) };
+      }
+      if (name === "portfolio" && scope.portfolio) return scope.mode === "REAL" ? realTradingService.getSnapshot(accountId, repository.getAccountById(accountId)?.displayCurrency ?? "USD") : portfolioService.getSnapshot(accountId);
+      if (name === "transactions" && scope.transactions) {
+        const records = scope.mode === "REAL" ? await realTradingService.listTransactions(accountId) : repository.listTransactions(repository.getPortfolioByAccountId(accountId)!.id);
+        return { mode: scope.mode, transactions: records.slice(0, 50), notice: "最多返回最近50笔成交" };
+      }
+      if (name === "watchlist" && scope.watchlist) return { mode: scope.mode, items: (await accountFeatureStore.listWatchlist(accountId, scope.mode)).map(x => source.getInstrumentById(x.instrumentId)) };
+      if (name === "web_search" && scope.web && scope.mode === "REAL") return searchWeb(z.string().trim().min(1).max(200).parse(args.query));
+      throw new AssistantError("此项数据未获授权");
+    },
+  });
+  assistant.register(app, request => requireAccount(request, authService)?.id);
 
   app.get("/api/health", async () => ({
     data: {
@@ -1100,6 +1147,8 @@ export async function createApplication(
   app.post<{
     Reply: ApiEnvelope<{ loggedOut: true }>;
   }>("/api/auth/logout", async (request) => {
+    const account = requireAccount(request, authService);
+    if (account) assistant.stop(account.id);
     await authService.logout(request.headers.authorization);
     return {
       data: { loggedOut: true },
@@ -1994,6 +2043,7 @@ export async function createApplication(
   }
 
   app.addHook("onClose", async () => {
+    await assistant.close();
     if (quickTimer) { clearInterval(quickTimer); quickTimer = null; }
     if (deepTimer) { clearInterval(deepTimer); deepTimer = null; }
     loadController.stop();

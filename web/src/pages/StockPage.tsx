@@ -306,7 +306,7 @@ export function StockPage({
             <div className="stock-heading-line">
               <h1>{item.instrument.name}</h1>
               <span className="simulation-chip">
-                {mode === "REAL" ? "真实行情 · 模拟交易" : "虚拟股票"}
+                {mode === "REAL" ? "真实行情 · 模拟交易" : "虚拟市场 · 模拟交易"}
               </span>
               <button
                 className={`watchlist-star detail-star ${watchlisted ? "selected" : ""}`}
@@ -319,7 +319,7 @@ export function StockPage({
             </div>
             <p>
               {marketLabel(item.instrument.market)} · {item.instrument.symbol} ·{" "}
-              {item.instrument.industry}
+              {item.instrument.industry} · 更新 {new Date(item.quote.updatedAt).toLocaleString("zh-CN")} · 显示 {displayCurrency}
             </p>
           </div>
         </div>
@@ -400,7 +400,7 @@ export function StockPage({
                     ? "REAL DATA · LOCALLY RECORDED"
                     : "PRO CHART · DATABASE RECORDED"}
                 </span>
-                <h2>价格、成交量与 MACD</h2>
+                <h2>走势与成交量</h2>
               </div>
               <div className="range-tabs">
                 {ranges.map((option) => (
@@ -566,9 +566,11 @@ export function StockPage({
                   <dt>行情时间</dt>
                   <dd>
                     {new Date(
-                      item.quote.receivedAt ?? item.quote.updatedAt,
+                      item.quote.updatedAt,
                     ).toLocaleString("zh-CN", { hour12: false })}
                   </dd>
+                  <dt>报价来源</dt>
+                  <dd>{item.quote.dataProvider === "TENCENT" ? "腾讯 · 单股补缺（可能延迟）" : item.quote.dataProvider === "SINA" ? "新浪 · 单股补缺" : "东方财富"}</dd>
                 </div>
               ) : null}
             </dl>

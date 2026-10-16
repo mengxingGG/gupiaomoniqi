@@ -259,7 +259,7 @@ export interface GameRepository {
   ): Promise<void>;
 
   createSession(session: SessionRecord): Promise<void>;
-  getSession(tokenHash: string): SessionRecord | undefined;
+  getSession(tokenHash: string, now?: number): SessionRecord | undefined;
   deleteSession(tokenHash: string): Promise<void>;
 
   replacePasswordResetChallenge(

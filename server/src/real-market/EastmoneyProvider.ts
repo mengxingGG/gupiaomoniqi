@@ -162,6 +162,7 @@ export interface EastmoneyProviderOptions {
     url: string,
     referer: string,
     timeoutMs: number,
+    signal?: AbortSignal,
   ) => Promise<Record<string, unknown>>;
 }
 
@@ -172,6 +173,7 @@ export class EastmoneyProvider {
     url: string,
     referer: string,
     timeoutMs: number,
+    signal?: AbortSignal,
   ) => Promise<Record<string, unknown>>;
 
   constructor(private readonly options: EastmoneyProviderOptions) {
@@ -346,7 +348,7 @@ export class EastmoneyProvider {
     }
 
     const now = this.#clock().toISOString();
-    return rows
+    const candles = rows
       .map((value) =>
         normalizeKlineRow(
           String(value),
@@ -356,6 +358,10 @@ export class EastmoneyProvider {
         ),
       )
       .filter((candle): candle is ProviderCandle => candle !== null);
+    if (candles.length !== rows.length) throw new EastmoneyProviderError(
+      `${instrument.symbol} 历史记录存在缺失字段，需要按股票补取完整区间`, "INVALID_RESPONSE",
+    );
+    return candles;
   }
 
   async #fetchIntraday(
@@ -415,12 +421,18 @@ export class EastmoneyProvider {
           "AppleWebKit/537.36 (KHTML, like Gecko) " +
           "Chrome/138.0 Safari/537.36 StockSimulator/3.0",
       },
+    }).then(response => {
+      if (response.status >= 500) throw new Error(`HTTP ${response.status}`);
+      return response;
     }).catch(async (error: unknown) => {
-      if (isHistoryUrl(url)) {
+      // 列表分片和盘口也需要兼容通道；取消请求时不再启动 Python。
+      signal?.throwIfAborted();
+      {
         try {
-          return await this.#requestHistoryFallback(
+          return await this.#requestCompatibilityFallback(
             url,
             referer,
+            signal,
           ).then((payload) => asSyntheticJsonResponse(payload));
         } catch (fallbackError) {
           throw new EastmoneyProviderError(
@@ -431,10 +443,6 @@ export class EastmoneyProvider {
           );
         }
       }
-      throw new EastmoneyProviderError(
-        `东方财富请求失败：${summarizeProviderError(error)}`,
-        "HTTP_ERROR",
-      );
     });
 
     if (!response.ok) {
@@ -468,23 +476,30 @@ export class EastmoneyProvider {
     return object;
   }
 
-  async #requestHistoryFallback(
+  async #requestCompatibilityFallback(
     url: string,
     referer: string,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     let lastError: unknown = null;
+    const deadline = Date.now() + this.options.requestTimeoutMs * 2;
     for (
       let attempt = 0;
-      attempt < HISTORY_FALLBACK_ATTEMPTS;
+      attempt < (isHistoryUrl(url) ? HISTORY_FALLBACK_ATTEMPTS : 1);
       attempt += 1
     ) {
       try {
+        signal?.throwIfAborted();
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
         return await this.#requestJsonFallback(
           url,
           referer,
-          this.options.requestTimeoutMs,
+          Math.min(this.options.requestTimeoutMs, remaining),
+          signal,
         );
       } catch (error) {
+        signal?.throwIfAborted();
         lastError = error;
       }
     }
@@ -604,7 +619,8 @@ function normalizeListRow(
   const low = priceValue(row.f16);
   const change = numericValue(row.f4);
   const percent = numericValue(row.f3);
-  const hasQuote = current > 0 && previousClose > 0;
+  const hasQuote = current > 0 && previousClose > 0 && open > 0 && high >= Math.max(open, current) && low > 0 && low <= Math.min(open, current)
+    && [row.f5, row.f6].every(value => value !== undefined && value !== null && !["-", "--", ""].includes(String(value)) && Number.isFinite(Number(value)) && Number(value) >= 0);
   const instrument: RealInstrumentRecord = {
     id: realInstrumentId(config.market, providerSecId),
     providerSecId,
@@ -706,7 +722,7 @@ function normalizeKlineRow(
     open <= 0 ||
     close <= 0 ||
     high <= 0 ||
-    low <= 0
+    low <= 0 || high < Math.max(open, close) || low > Math.min(open, close)
   ) {
     return null;
   }
@@ -959,7 +975,7 @@ function summarizeProviderError(error: unknown): string {
 export function realCandleSourceWeight(
   source: CandleSource,
 ): number {
-  return source === "REAL_PROVIDER_HISTORY"
+  return source === "REAL_PROVIDER_HISTORY" || source === "REAL_TENCENT_HISTORY"
     ? 3
     : source === "REAL_PROVIDER_SNAPSHOT"
       ? 2

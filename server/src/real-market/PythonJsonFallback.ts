@@ -51,32 +51,41 @@ export async function requestJsonViaPython(
   url: string,
   referer: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const attempts = await pythonCommandCandidates();
   let lastError: Error | null = null;
+  const deadline = Date.now() + timeoutMs;
 
   for (const candidate of attempts) {
+    signal?.throwIfAborted();
     try {
-      const stdout = await runPython(candidate, url, referer, timeoutMs);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Python fallback timed out");
+      const stdout = await runPython(candidate, url, referer, remaining, signal);
       const payload = JSON.parse(stdout) as unknown;
       if (!isObject(payload)) {
         throw new Error("Python fallback did not return a JSON object");
       }
       return payload;
     } catch (error) {
+      signal?.throwIfAborted();
       lastError =
         error instanceof Error ? error : new Error(String(error));
+      // 仅在解释器不存在时寻找下一个命令；网络错误不能触发重复启动所有解释器。
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw lastError;
     }
   }
 
   throw lastError ?? new Error("Python fallback unavailable");
 }
 
-async function pythonCommandCandidates(): Promise<Array<{
+export async function pythonCommandCandidates(platform: NodeJS.Platform = process.platform): Promise<Array<{
   command: string;
   args: string[];
 }>> {
-  if (process.platform === "win32") {
+  if (process.env.PYTHON_EXECUTABLE) return [{ command: process.env.PYTHON_EXECUTABLE, args: [] }];
+  if (platform === "win32") {
     if (!windowsPythonCandidatesPromise) {
       windowsPythonCandidatesPromise = resolveWindowsPythonCandidates();
     }
@@ -117,6 +126,7 @@ async function runPython(
   url: string,
   referer: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -125,6 +135,7 @@ async function runPython(
       {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        signal,
       },
     );
     let stdout = "";

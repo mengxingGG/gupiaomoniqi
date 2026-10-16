@@ -1,0 +1,23 @@
+.stock-page .stock-heading{gap:16px;margin-bottom:14px}.stock-page .stock-heading h1{font-family:inherit;font-size:clamp(24px,2.4vw,34px);font-weight:700}.stock-page .quote-stat-grid{border-radius:12px}.stock-page .quote-stat,.stock-page .headline-quote strong{font-variant-numeric:tabular-nums}.stock-page .stock-title-block p{font-size:12px;line-height:1.8}
+@media(min-width:1300px){.stock-page .stock-main-column{grid-template-columns:minmax(0,1fr) 270px;align-items:start}.stock-page .stock-lower-grid{display:contents}.stock-page .chart-panel{grid-column:1;grid-row:1}.stock-page .order-book-panel{grid-column:2;grid-row:1}.stock-page .position-panel{grid-column:1 / -1}.stock-page .chart-toolbar{flex-wrap:wrap}}
+@media(max-width:600px){.stock-page .stock-heading-line{flex-direction:row;flex-wrap:wrap;align-items:center}.stock-page .stock-heading-line h1{width:100%}.stock-page .quote-stat-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.stock-page .quote-stat{padding:10px 8px;font-size:12px}.stock-page .quote-stat strong{font-size:14px}.stock-page .chart-toolbar h2{font-size:18px}.stock-page .range-tabs button{min-height:44px}}
+
+/* K 线保持白底，主图和成交量对齐；均线与坐标不依赖字体图标。 */
+.kline-chart { background: #fff; color: #4c535c; padding: 8px 4px; border-radius: 8px; }
+.kline-chart .chart-readout { margin-bottom: 4px; padding: 4px 8px; gap: 6px 12px; background: transparent; font-size: 11px; }
+.kline-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 4px 8px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.kline-legend button { margin-left: auto; min-height: 36px; padding: 4px 8px; border: 0; color: #66717b; background: transparent; cursor: pointer; font-size: 11px; }
+.kline-chart .chart-grid-line { stroke: #edf0f3; stroke-width: .6; stroke-dasharray: none; }
+.kline-chart .chart-axis-label, .kline-chart .chart-time-label, .kline-chart .chart-section-label { font-size: 12px; fill: #77808b; }
+.kline-chart .candle-up rect { fill: #fff; stroke: #df3e44; stroke-width: .8; }
+.kline-chart .candle-up line { stroke: #df3e44; stroke-width: .8; }
+.kline-chart .candle-down rect { fill: #24976b; stroke: #24976b; stroke-width: .8; }
+.kline-chart .candle-down line { stroke: #24976b; stroke-width: .8; }
+.kline-chart .volume-up { fill: #fff; stroke: #df3e44; stroke-width: .7; vector-effect: non-scaling-stroke; }
+.kline-chart .volume-down { fill: #24976b; }
+.kline-ma { fill: none; stroke-width: .9; vector-effect: non-scaling-stroke; }
+.kline-extreme-line { stroke: #65717c; stroke-width: .6; vector-effect: non-scaling-stroke; }
+.kline-extreme { font-size: 12px; fill: #4c535c; }
+.kline-chart svg { touch-action: pan-y; }
+.kline-chart svg:focus-visible { outline: 2px solid #385f91; outline-offset: 3px; }
+@media (max-width: 600px) { .kline-chart .chart-axis-label, .kline-chart .chart-time-label, .kline-chart .chart-section-label, .kline-extreme { font-size: 21px; } }

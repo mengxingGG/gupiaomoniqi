@@ -51,6 +51,7 @@ export interface ProviderOrderBookLevel {
 }
 
 export interface ProviderOrderBook {
+  dataProvider?: "EASTMONEY" | "TENCENT";
   asks: ProviderOrderBookLevel[];
   bids: ProviderOrderBookLevel[];
   updatedAt: string;

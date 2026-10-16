@@ -4,8 +4,9 @@ import type {
   QuoteCurrency,
 } from "@gupiaomoniqi/shared";
 import {
-  type MouseEvent,
+  type PointerEvent,
   useId,
+  useEffect,
   useMemo,
   useState,
 } from "react";
@@ -41,6 +42,10 @@ export function MarketChart({
 }: MarketChartProps) {
   const gradientId = useId().replaceAll(":", "");
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [showMacd, setShowMacd] = useState(false);
+  useEffect(() => setHoverIndex(null), [series.instrumentId, series.range]);
+  const isKline = series.range !== "INTRADAY";
+  const chartHeight = isKline && !showMacd ? 380 : HEIGHT;
   const chart = useMemo(
     () =>
       buildChartModel(series, quoteCurrency, displayCurrency),
@@ -49,11 +54,11 @@ export function MarketChart({
   const active =
     hoverIndex === null
       ? series.candles[series.candles.length - 1]
-      : series.candles[hoverIndex];
+      : series.candles[Math.min(hoverIndex, series.candles.length - 1)];
   const activePoint =
     hoverIndex === null
       ? chart.candles[chart.candles.length - 1]
-      : chart.candles[hoverIndex];
+      : chart.candles[Math.min(hoverIndex, chart.candles.length - 1)];
 
   if (series.candles.length === 0 || !active) {
     return (
@@ -86,7 +91,7 @@ export function MarketChart({
       ? null
       : xFor(hoverIndex, series.candles.length);
 
-  function handleMouseMove(event: MouseEvent<SVGSVGElement>) {
+  function handlePointerMove(event: PointerEvent<SVGSVGElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
     const relativeX =
       ((event.clientX - bounds.left) / bounds.width) * WIDTH;
@@ -100,7 +105,7 @@ export function MarketChart({
   }
 
   return (
-    <div className="market-chart">
+    <div className={`market-chart ${isKline ? "kline-chart" : ""}`}>
       {series.range === "INTRADAY" ? (
         <div className={`chart-status-strip ${statusTone}`}>
           <div className="chart-status-price">
@@ -149,8 +154,8 @@ export function MarketChart({
       ) : null}
 
       <div className="chart-readout">
-        <span>数据库记录</span>
-        {series.coverageStart ? (
+        {!isKline && <span>数据库记录</span>}
+        {!isKline && series.coverageStart ? (
           <span>
             起点 {formatChartTime(series.coverageStart, series.range)}
           </span>
@@ -210,13 +215,25 @@ export function MarketChart({
         </div>
       ) : null}
 
+      {isKline && <div className="kline-legend">
+        {chart.movingAverages.map((ma) => <span key={ma.period} style={{ color: ma.color }}>MA{ma.period} {ma.values[hoverIndex ?? ma.values.length - 1]?.toFixed(2) ?? "—"}</span>)}
+        <button type="button" aria-pressed={showMacd} onClick={() => setShowMacd(!showMacd)}>MACD {showMacd ? "收起" : "展开"}</button>
+      </div>}
       <div className="chart-stage">
         <svg
-          viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+          viewBox={`0 0 ${WIDTH} ${chartHeight}`}
           role="img"
           aria-label={`${series.range} 数据库行情图`}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHoverIndex(null)}
+          tabIndex={0}
+          onPointerMove={handlePointerMove}
+          onPointerLeave={(e) => { if (e.pointerType === "mouse") setHoverIndex(null); }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+              e.preventDefault();
+              setHoverIndex((n) => Math.min(series.candles.length - 1, Math.max(0, (n ?? series.candles.length - 1) + (e.key === "ArrowLeft" ? -1 : 1))));
+            }
+            if (e.key === "Escape") setHoverIndex(null);
+          }}
         >
           <defs>
             <linearGradient
@@ -327,6 +344,11 @@ export function MarketChart({
             ))
           )}
 
+          {isKline && chart.movingAverages.map((ma) => <path key={ma.period} d={ma.path} stroke={ma.color} className="kline-ma" />)}
+          {isKline && chart.extremes.map((point) => <g key={point.kind}>
+            <line className="kline-extreme-line" x1={point.x} x2={point.labelX} y1={point.y} y2={point.labelY} />
+            <text className="kline-extreme" x={point.labelX} y={point.labelY - (point.kind === "high" ? 4 : -12)} textAnchor={point.anchor}>{point.value.toFixed(2)}</text>
+          </g>)}
           {chart.volumeBars.map((bar) => (
             <rect
               className={bar.up ? "volume-up" : "volume-down"}
@@ -342,7 +364,7 @@ export function MarketChart({
             VOL
           </text>
 
-          {series.range !== "INTRADAY" ? (
+          {series.range !== "INTRADAY" && showMacd ? (
             <>
               <line
                 className="chart-divider"
@@ -382,7 +404,7 @@ export function MarketChart({
               className="chart-time-label"
               key={label.x}
               x={label.x}
-              y={HEIGHT - 4}
+              y={chartHeight - 4}
               textAnchor={label.anchor}
             >
               {label.text}
@@ -395,7 +417,7 @@ export function MarketChart({
               x1={activeX}
               x2={activeX}
               y1={PRICE_TOP}
-              y2={series.range === "INTRADAY" ? VOLUME_BOTTOM : MACD_BOTTOM}
+              y2={isKline && showMacd ? MACD_BOTTOM : VOLUME_BOTTOM}
             />
           ) : null}
         </svg>
@@ -405,7 +427,7 @@ export function MarketChart({
             className="chart-hover-card"
             style={{
               left: `${Math.min(78, Math.max(2, (activePoint.x / WIDTH) * 100 + 1.6))}%`,
-              top: `${Math.min(72, Math.max(2, (activePoint.closeY / HEIGHT) * 100 - 4))}%`,
+              top: `${Math.min(72, Math.max(2, (activePoint.closeY / chartHeight) * 100 - 4))}%`,
             }}
           >
             <strong>{formatChartTime(active.time, series.range)}</strong>
@@ -450,11 +472,12 @@ function buildChartModel(
             displayCurrency,
           ),
   }));
+  const movingAverages = [5, 10, 20].map((period, index) => ({ period, color: ["#4c535c", "#e8a02f", "#ad56b6"][index]!, values: displayCandles.map((_, i) => i < period - 1 ? null : displayCandles.slice(i - period + 1, i + 1).reduce((sum, c) => sum + c.close, 0) / period) }));
   const averagePrices = displayCandles
     .map((item) => item.averagePrice)
     .filter((value): value is number => value !== undefined);
   const referencePrice =
-    series.referencePrice === undefined
+    series.range !== "INTRADAY" || series.referencePrice === undefined
       ? undefined
       : quoteToDisplay(series.referencePrice, quoteCurrency, displayCurrency);
   const minimum = Math.min(
@@ -598,11 +621,11 @@ function buildChartModel(
               : "down",
     };
   });
-  const labelIndexes = [
+  const labelIndexes = [...new Set([
     0,
     Math.floor((displayCandles.length - 1) / 2),
     displayCandles.length - 1,
-  ];
+  ])];
   const timeGrid = Array.from(
     { length: series.range === "INTRADAY" ? 6 : 4 },
     (_, index) => ({
@@ -615,7 +638,7 @@ function buildChartModel(
   );
   const timeLabels = labelIndexes.map((index, labelIndex) => ({
     x: xFor(index, displayCandles.length),
-    text: formatChartTime(displayCandles[index]!.time, series.range),
+    text: displayCandles[index] ? formatChartTime(displayCandles[index]!.time, series.range) : "",
     anchor:
       labelIndex === 0
         ? ("start" as const)
@@ -624,7 +647,15 @@ function buildChartModel(
           : ("middle" as const),
   }));
 
+  const extremes = displayCandles.length === 0 ? [] : (["high", "low"] as const).map((kind) => {
+    const i = displayCandles.reduce((best, c, index) => (kind === "high" ? c.high > displayCandles[best]!.high : c.low < displayCandles[best]!.low) ? index : best, 0);
+    const point = candles[i]!;
+    const toLeft = i > displayCandles.length / 2;
+    return { kind, x: point.x, y: priceY(point[kind]), value: point[kind], labelX: point.x + (toLeft ? -24 : 24), labelY: priceY(point[kind]) + (kind === "high" ? -10 : 10), anchor: toLeft ? "end" as const : "start" as const };
+  });
   return {
+    movingAverages: movingAverages.map((ma) => ({ ...ma, path: ma.values.flatMap((v, i) => v === null ? [] : [`${i === ma.period - 1 ? "M" : "L"} ${xFor(i, candles.length)} ${priceY(v)}`]).join(" ") })),
+    extremes,
     candles,
     linePath,
     averagePath,

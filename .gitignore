@@ -1,4 +1,6 @@
 node_modules/
+server/data/assistant/
+.task-test/
 dist/
 coverage/
 logs/

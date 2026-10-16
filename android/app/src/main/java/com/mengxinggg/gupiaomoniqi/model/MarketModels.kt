@@ -76,6 +76,7 @@ data class Quote(
     val changePercent: Double,
     val updatedAt: String,
     val receivedAt: String? = null,
+    val dataProvider: String? = null,
 )
 
 data class MarketItem(

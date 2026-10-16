@@ -664,6 +664,16 @@ class ApiClient(
         decoded.value
     }
 
+    fun assistantRequest(path: String = "", method: String = "GET", body: JSONObject? = null): JSONObject {
+        require(path.isEmpty() || path.matches(Regex("/[a-zA-Z0-9/\\-]+")))
+        try {
+            return requestObject(path = "/api/assistant$path", method = method, body = body) { it }
+        } catch (error: ApiClientException) {
+            if (error.status == 404 && path.isEmpty()) throw ApiClientException("ASSISTANT_NOT_ENABLED", 404, "当前服务器尚未启用 AI 助手，请更新服务端到 1.1.0 或以上。")
+            throw error
+        }
+    }
+
     private fun <T> requestObject(
         path: String,
         method: String = "GET",

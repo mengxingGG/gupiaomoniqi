@@ -109,10 +109,7 @@ fun AppTopControls(
                     .clickable(role = Role.Button, onClick = onSettingsClick),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    "⚙",
-                    style = MaterialTheme.typography.titleSmall,
-                )
+                FineIcon(FineSymbol.SETTINGS, null, Modifier.size(20.dp))
                 if (hasAppUpdate) {
                     Box(
                         modifier = Modifier

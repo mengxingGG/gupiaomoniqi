@@ -137,6 +137,7 @@ object JsonCodec {
         changePercent = json.getDouble("changePercent"),
         updatedAt = json.getString("updatedAt"),
         receivedAt = json.nullableString("receivedAt"),
+        dataProvider = json.nullableString("dataProvider"),
     )
 
     fun marketItem(json: JSONObject): MarketItem = MarketItem(

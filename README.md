@@ -59,6 +59,10 @@ npm run dev
 
 规则 AI 2.0、长期价值锚、所有权溢价和事件状态说明见 [规则 AI 2.0 与市场状态引擎](docs/规则AI2.0与市场状态引擎.md)。自动模拟事件可通过 `VIRTUAL_MARKET_EVENTS_ENABLED=false` 关闭。
 
+## 1.1.0 产品与验收
+
+个股详情、Android AI 助手、记忆/上下文与 Web 下载入口见 [产品方向备忘](docs/产品方向备忘-个股详情与AI助手.md)。行情按股票补缺见 [多路线获取](docs/行情数据多路线评估.md)，构建、回放与运行边界见 [1.1.0 交付与验收](docs/1.1.0-交付与验收.md)。
+
 ## Android
 
 Android 客户端位于 `android/`，生产服务地址固定为 `https://gupiaomoniqi.org`，普通用户无需填写或切换服务器。正式 APK 随 GitHub Release 提供，应用也可从设置页检查服务器更新。

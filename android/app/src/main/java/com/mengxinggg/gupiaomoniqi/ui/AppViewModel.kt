@@ -2564,7 +2564,8 @@ private fun MarketItem.toUi(): StockUi = StockUi(
     lotSize = instrument.lotSize,
     settlementCycle = instrument.settlementCycle.name,
     tradable = instrument.isTradable,
-    updatedAt = quote.receivedAt ?: quote.updatedAt,
+    updatedAt = quote.updatedAt,
+    dataProvider = quote.dataProvider,
 )
 
 internal fun Candle.toUi(): CandleUi = CandleUi(

@@ -523,7 +523,7 @@ export class AuthService {
       return undefined;
     }
 
-    const session = this.repository.getSession(hashToken(token));
+    const session = this.repository.getSession(hashToken(token), this.clock().getTime());
     return session
       ? this.repository.getAccountById(session.accountId)
       : undefined;

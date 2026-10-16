@@ -30,6 +30,7 @@ fun ServerSettingsSheet(
     updateState: AppUpdateUiState,
     onDismiss: () -> Unit,
     onUpdateAction: () -> Unit,
+    onAssistantSettings: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -52,6 +53,13 @@ fun ServerSettingsSheet(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                 )
+            }
+
+            OutlinedButton(onClick = onAssistantSettings, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                    Text("AI 助手管理", fontWeight = FontWeight.Bold)
+                    Text("模型服务、长期记忆、上下文与思考", style = MaterialTheme.typography.bodySmall)
+                }
             }
 
             Surface(

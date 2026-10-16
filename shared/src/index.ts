@@ -1,3 +1,4 @@
+export * from "./assistant.js";
 export type MarketMode = "VIRTUAL" | "REAL";
 export type StockMarket = "CN" | "HK" | "US" | "UK";
 export type InstrumentType = "STOCK_VIRTUAL" | "STOCK_REAL";
@@ -14,6 +15,7 @@ export type CandleSource =
   | "TRANSACTION_BACKFILL"
   | "MARKET_TICK"
   | "REAL_PROVIDER_HISTORY"
+  | "REAL_TENCENT_HISTORY"
   | "REAL_PROVIDER_SNAPSHOT";
 export type SettlementCycle = "T0" | "T1";
 export type TradeActorType = "USER" | "AI";
@@ -97,6 +99,7 @@ export interface Instrument {
 }
 
 export interface Quote {
+  dataProvider?: "EASTMONEY" | "TENCENT" | "SINA";
   instrumentId: string;
   symbol: string;
   market: StockMarket;
@@ -354,6 +357,7 @@ export interface RealMarketStatus {
   hotPageCount: number;
   lastError: string | null;
   markets: RealMarketMarketStatus[];
+  gapFill?: { quotes: number; histories: number; orderBooks: number; lastSuccessAt: string | null };
 }
 
 export interface WatchlistItem {

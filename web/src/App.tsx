@@ -23,6 +23,8 @@ import { AuthPage } from "./pages/AuthPage";
 import { HomePage } from "./pages/HomePage";
 import { OrdersPage, type OrdersTab } from "./pages/OrdersPage";
 import { StockPage } from "./pages/StockPage";
+import { AppDownload } from "./components/AppDownload";
+import "./stock-detail.css";
 import type { ConnectionState } from "./useQuoteSocket";
 
 type Route =
@@ -281,6 +283,7 @@ export function App() {
             </button>
           </div>
 
+          <AppDownload />
           {account ? (
             <div className="account-menu">
               <button
