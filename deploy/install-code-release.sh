@@ -19,6 +19,8 @@ cd "$release_dir"
 npm ci --omit=dev --no-audit --no-fund
 
 test -f "$release_dir/server/dist/index.js"
+test -f "$release_dir/server/assistant/AGENT.md"
+test -f "$release_dir/shared/dist/index.js"
 test -f "$release_dir/web/dist/index.html"
 test -f /var/lib/gupiaomoniqi/pgdata/PG_VERSION
 test -f /var/lib/gupiaomoniqi/real-pgdata/PG_VERSION

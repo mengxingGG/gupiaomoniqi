@@ -44,7 +44,7 @@ OpenAI 参数语义参考：[Chat Completions](https://platform.openai.com/docs/
 
 ## 存储与运维
 
-默认数据目录 `server/data/assistant` 已被 Git 忽略。按账户哈希隔离目录，API Key 使用 AES-256-GCM 加密，随机 `master.key` 与数据一起受服务账号权限保护。迁移必须一起保留密钥文件；不要把密钥、账户文件和测试配置推到 GitHub。
+助手数据目录优先使用 `ASSISTANT_DATA_DIR`，其次为 `DATABASE_DIR` 同级的 `assistant`，均未配置时使用已被 Git 忽略的 `server/data/assistant`。Linux 服务和 Windows 发布启动器均指定持久目录，独立于版本源码目录。按账户哈希隔离目录，API Key 使用 AES-256-GCM 加密，随机 `master.key` 与数据一起受服务账号权限保护。迁移必须一起保留密钥文件；不要把密钥、账户文件和测试配置推到 GitHub。发布包必须包含固定的 `server/assistant/AGENT.md`。
 
 目前存储事务假设单个 Node 进程；多实例部署需要统一存储与跨进程锁，不能让多个进程直接写同一目录。网络传输限制重定向、私网目标和响应大小；内网模型仅由部署方显式配置 `ASSISTANT_ALLOWED_HOSTS` 后可用。
 

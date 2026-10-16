@@ -9,6 +9,14 @@
     "web"
   ],
   "scripts": {
+    "build:shared": "tsc -p shared/tsconfig.json",
+    "prelocal:prepare": "npm run build:shared",
+    "predev": "npm run build:shared",
+    "predev:app": "npm run build:shared",
+    "predev:server": "npm run build:shared",
+    "predev:web": "npm run build:shared",
+    "pretest": "npm run build:shared",
+    "pretest:watch": "npm run build:shared",
     "data:seed": "node scripts/fetch-market-seeds.mjs --count 300",
     "data:init": "tsx server/src/startup/localPrepare.ts",
     "data:import": "tsx server/src/db/importMarketSeeds.ts",

@@ -228,6 +228,7 @@ $env:PORT = [string]$Port
 $env:SERVE_WEB = "true"
 $env:DATABASE_DIR = Join-Path $dataDirectory "pgdata"
 $env:REAL_DATABASE_DIR = Join-Path $dataDirectory "real-pgdata"
+$env:ASSISTANT_DATA_DIR = Join-Path $dataDirectory "assistant"
 $env:MARKET_SEED_PATH = Join-Path $dataDirectory "market-seeds.json"
 $env:REAL_MARKET_SYNC_ENABLED = if ($DisableRealMarketSync) {
     "false"

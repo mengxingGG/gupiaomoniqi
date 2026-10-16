@@ -1,6 +1,6 @@
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHeapStatistics } from "node:v8";
 import cors from "@fastify/cors";
@@ -778,7 +778,8 @@ export async function createApplication(
   });
 
   registerAppUpdateRoutes(app, appUpdateService);
-  const assistant = new AssistantService(options.assistantDirectory ?? fileURLToPath(new URL("../data/assistant", import.meta.url)), {
+  const assistant = new AssistantService(options.assistantDirectory ?? process.env.ASSISTANT_DATA_DIR ??
+    (process.env.DATABASE_DIR ? join(dirname(resolve(process.env.DATABASE_DIR)), "assistant") : fileURLToPath(new URL("../data/assistant", import.meta.url))), {
     async read(accountId, scope, name, args) {
       const source = scope.mode === "REAL" ? realRepository : repository;
       const instrumentId = typeof args.instrumentId === "string" ? args.instrumentId : scope.instrumentId;

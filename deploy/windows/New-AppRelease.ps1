@@ -249,7 +249,9 @@ $recursiveCopySources = @(
     "deploy\windows",
     "scripts",
     "server\dist",
+    "server\assistant",
     "shared\src",
+    "shared\dist",
     "web\dist",
     "node_modules"
 )
@@ -306,9 +308,11 @@ $requiredSourceFiles = @(
     "package-lock.json",
     "server\package.json",
     "server\dist\index.js",
+    "server\assistant\AGENT.md",
     "server\dist\runtime\ShutdownRequestWatcher.js",
     "shared\package.json",
     "shared\src\index.ts",
+    "shared\dist\index.js",
     "web\package.json",
     "web\dist\index.html",
     "deploy\windows\_Common.ps1",
@@ -392,6 +396,12 @@ foreach ($component in @("server", "shared", "web")) {
 Copy-ReleaseItem `
     -Source (Join-Path $sourceRoot "server\dist") `
     -Destination (Join-Path $destination "server\dist")
+Copy-ReleaseItem `
+    -Source (Join-Path $sourceRoot "server\assistant") `
+    -Destination (Join-Path $destination "server\assistant")
+Copy-ReleaseItem `
+    -Source (Join-Path $sourceRoot "shared\dist") `
+    -Destination (Join-Path $destination "shared\dist")
 Copy-ReleaseItem `
     -Source (Join-Path $sourceRoot "shared\src") `
     -Destination (Join-Path $destination "shared\src")

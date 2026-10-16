@@ -29,6 +29,8 @@ tar -xzf "$code_archive" -C "$release_dir"
 
 cd "$release_dir"
 npm ci --omit=dev --no-audit --no-fund
+test -f "$release_dir/server/assistant/AGENT.md"
+test -f "$release_dir/shared/dist/index.js"
 
 install -d -m 0750 -o gupiaomoniqi -g gupiaomoniqi "$data_stage"
 tar -xzf "$data_archive" -C "$data_stage"
