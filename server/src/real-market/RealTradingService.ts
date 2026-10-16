@@ -888,7 +888,7 @@ export class RealTradingService {
   }
 
   #toPublicOrder(row: RealOrderRow): LimitOrder {
-    const instrument = this.repository.getInstrumentById(
+    const instrument = this.repository.getRecordedInstrumentById(
       row.instrument_id,
     );
     if (!instrument) {
@@ -1311,7 +1311,7 @@ export class RealTradingService {
     const positions = positionResult.rows
       .map(mapPosition)
       .map((record): Position | null => {
-        const instrument = this.repository.getInstrumentById(
+        const instrument = this.repository.getRecordedInstrumentById(
           record.instrumentId,
         );
         const quote = this.repository.getQuote(record.instrumentId);

@@ -83,9 +83,8 @@ private data class AssetsSnapshot(
 )
 
 private data class OrdersSnapshot(
-    val transactions: List<Transaction>,
-    val orders: List<LimitOrder>,
-    val ordersUnavailable: Boolean,
+    val transactions: Result<List<Transaction>>,
+    val orders: Result<Pair<List<LimitOrder>, Boolean>>,
 )
 
 class AppViewModel(
@@ -226,6 +225,8 @@ class AppViewModel(
                 transactions = emptyList(),
                 orders = emptyList(),
                 ordersUnavailable = false,
+                transactionsError = null,
+                ordersError = null,
                 detailLoading = current.screen == AppScreen.DETAIL && selectedIdentity != null,
                 chartLoading = current.screen == AppScreen.DETAIL && selectedIdentity != null,
                 detailError = null,
@@ -642,6 +643,8 @@ class AppViewModel(
                         transactions = emptyList(),
                         orders = emptyList(),
                         ordersUnavailable = false,
+                        transactionsError = null,
+                        ordersError = null,
                         watchlistIds = emptySet(),
                         watchlistItems = emptyList(),
                         checkIn = null,
@@ -1015,6 +1018,8 @@ class AppViewModel(
                 transactions = emptyList(),
                 orders = emptyList(),
                 ordersUnavailable = false,
+                transactionsError = null,
+                ordersError = null,
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,
@@ -1894,51 +1899,34 @@ class AppViewModel(
         val mutationEpoch = portfolioMutationEpoch
         _uiState.update { it.copy(accountLoading = true, accountError = null) }
         viewModelScope.launch {
-            runCatching {
-                coroutineScope {
-                    val transactions = async {
-                        repository.getTransactions(context.mode.toModel())
-                    }
-                    val orders = async {
-                        loadOrdersCompatible(context, forceOrdersProbe)
-                    }
-                    val orderResult = orders.await()
-                    OrdersSnapshot(
-                        transactions = transactions.await(),
-                        orders = orderResult.first,
-                        ordersUnavailable = orderResult.second,
-                    )
-                }
-            }.onSuccess { snapshot ->
-                if (
-                    requestId != accountRequestId ||
-                    mutationEpoch != portfolioMutationEpoch ||
-                    !privateContextMatches(context)
-                ) return@onSuccess
-                _uiState.update {
-                    it.copy(
-                        transactions = snapshot.transactions.map(Transaction::toUi),
-                        orders = snapshot.orders.map(LimitOrder::toUi),
-                        ordersUnavailable = snapshot.ordersUnavailable,
-                        accountLoading = false,
-                        accountError = null,
-                    )
-                }
-            }.onFailure { error ->
-                if (error is CancellationException) return@onFailure
-                if (
-                    requestId != accountRequestId ||
-                    mutationEpoch != portfolioMutationEpoch ||
-                    !privateContextMatches(context)
-                ) return@onFailure
-                if (handleSessionExpiry(error)) return@onFailure
-                _uiState.update {
-                    it.copy(
-                        accountLoading = false,
-                        accountError = error.userMessage("订单读取失败"),
-                    )
-                }
-            }
+            val result = loadOrderSections(
+                transactions = { repository.getTransactions(context.mode.toModel()) },
+                orders = { loadOrdersCompatible(context, forceOrdersProbe) },
+            )
+            if (
+                requestId != accountRequestId ||
+                mutationEpoch != portfolioMutationEpoch ||
+                !privateContextMatches(context)
+            ) return@launch
+            applyOrderSnapshot(OrdersSnapshot(result.first, result.second))
+        }
+    }
+
+    private fun applyOrderSnapshot(snapshot: OrdersSnapshot) {
+        val errors = listOfNotNull(snapshot.transactions.exceptionOrNull(), snapshot.orders.exceptionOrNull())
+        if (errors.any { handleSessionExpiry(it) }) return
+        _uiState.update {
+            it.copy(
+                transactions = snapshot.transactions.getOrNull()?.map(Transaction::toUi) ?: it.transactions,
+                orders = snapshot.orders.getOrNull()?.first?.map(LimitOrder::toUi) ?: it.orders,
+                ordersUnavailable = snapshot.orders.getOrNull()?.second ?: it.ordersUnavailable,
+                transactionsError = snapshot.transactions.exceptionOrNull()?.userMessage("成交记录读取失败"),
+                ordersError = snapshot.orders.exceptionOrNull()?.let { error ->
+                    error.orderSectionMessage(error.userMessage("委托订单读取失败"))
+                },
+                accountLoading = false,
+                accountError = null,
+            )
         }
     }
 
@@ -2038,7 +2026,7 @@ class AppViewModel(
                         privateContextMatches(context)
                     ) {
                         _uiState.update {
-                            it.copy(transactions = transactions.map(Transaction::toUi))
+                            it.copy(transactions = transactions.map(Transaction::toUi), transactionsError = null)
                         }
                     }
                 }
@@ -2072,6 +2060,7 @@ class AppViewModel(
                             it.copy(
                                 orders = result.first.map(LimitOrder::toUi),
                                 ordersUnavailable = result.second,
+                                ordersError = null,
                             )
                         }
                     }
@@ -2254,37 +2243,22 @@ class AppViewModel(
     private suspend fun refreshOrdersSilently() {
         val context = privateRequestContext() ?: return
         val mutationEpoch = portfolioMutationEpoch
+        val requestId = accountRequestId
         if (_uiState.value.accountLoading || _uiState.value.cancellingOrderId != null) return
-        val result = try {
-            coroutineScope {
-                val transactions = async {
-                    repository.getTransactions(context.mode.toModel())
-                }
-                val orders = async { loadOrdersCompatible(context) }
-                transactions.await() to orders.await()
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            if (privateContextMatches(context)) handleSessionExpiry(error)
-            return
-        }
+        val result = loadOrderSections(
+            transactions = { repository.getTransactions(context.mode.toModel()) },
+            orders = { loadOrdersCompatible(context) },
+        )
         val current = _uiState.value
         if (
             current.screen == AppScreen.MAIN &&
             current.selectedTab == MainTab.ORDERS &&
+            requestId == accountRequestId &&
             mutationEpoch == portfolioMutationEpoch &&
             privateContextMatches(context) &&
             !current.accountLoading
         ) {
-            _uiState.update {
-                it.copy(
-                    transactions = result.first.map(Transaction::toUi),
-                    orders = result.second.first.map(LimitOrder::toUi),
-                    ordersUnavailable = result.second.second,
-                    accountError = null,
-                )
-            }
+            applyOrderSnapshot(OrdersSnapshot(result.first, result.second))
         }
     }
 
@@ -2453,6 +2427,8 @@ class AppViewModel(
                 transactions = emptyList(),
                 orders = emptyList(),
                 ordersUnavailable = false,
+                transactionsError = null,
+                ordersError = null,
                 watchlistIds = emptySet(),
                 watchlistItems = emptyList(),
                 checkIn = null,

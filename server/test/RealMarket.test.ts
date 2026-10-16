@@ -8,6 +8,7 @@ import {
 import { RealMarketDetailService } from "../src/real-market/RealMarketDetailService.js";
 import { migrateRealDatabase } from "../src/real-market/db/migrations.js";
 import { RealMarketRepository } from "../src/real-market/RealMarketRepository.js";
+import { RealTradingService } from "../src/real-market/RealTradingService.js";
 import { RealMarketRuntime } from "../src/real-market/RealMarketRuntime.js";
 import type {
   ProviderInstrumentSnapshot,
@@ -1343,6 +1344,79 @@ describe("真实行情完整模块", () => {
       expect(account.json().data.frozenCashUsd).toBe(0);
       expect(account.json().data.availableCashUsd).toBe(999_149);
       expect(account.json().data.positions[0].quantity).toBe(10);
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("行情扫描停用旧标的后仍能读取历史委托和持仓、幂等重试与撤单，且不能新下单", async () => {
+    const now = new Date();
+    const virtual = await createTestHarness({ clock: () => now });
+    const { client, repository: realRepository } = await createRealRepository();
+    await realRepository.upsertProviderPage(providerPage(now.toISOString()), "old-sweep");
+    const context = await createApplication({
+      repository: virtual.repository,
+      realRepository,
+      realSyncEnabled: false,
+      aiEnabled: false,
+      clock: () => now,
+    });
+    const headers = { authorization: `Bearer ${virtual.auth!.token}` };
+    const request = {
+      instrumentId: "real-us-105-aapl",
+      side: "BUY" as const,
+      quantity: 10,
+      orderMode: "MARKET" as const,
+      idempotencyKey: "historical-buy",
+    };
+    try {
+      const service = context.realTradingService;
+      const id = virtual.accountId!;
+      const bought = await service.placeOrder(id, "USD", request);
+      const buy = await service.placeOrder(id, "USD", {
+        ...request, orderMode: "LIMIT", limitPrice: 90, quantity: 5,
+        idempotencyKey: "historical-limit-buy",
+      });
+      const sell = await service.placeOrder(id, "USD", {
+        ...request, side: "SELL", orderMode: "LIMIT", limitPrice: 110, quantity: 4,
+        idempotencyKey: "historical-limit-sell",
+      });
+      await realRepository.startSweep("next-sweep", now.toISOString());
+      await realRepository.completeSweep("next-sweep", {
+        completedAt: now.toISOString(), totalPages: 1, completedPages: 1,
+        failedPages: 0, instrumentRows: 0, durationMs: 1,
+        successfulMarkets: new Set(["US"]),
+      });
+      expect(realRepository.getInstrumentById(request.instrumentId)).toBeUndefined();
+      expect(realRepository.listMarket({ page: 1, pageSize: 20 }).total).toBe(0);
+
+      const listed = await context.app.inject({
+        method: "GET", url: "/api/account/orders?mode=REAL", headers,
+      });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().data).toHaveLength(3);
+      for (const order of listed.json().data) {
+        expect(order).toMatchObject({ symbol: "AAPL", name: "苹果" });
+      }
+      const snapshot = await service.getSnapshot(id, "USD");
+      expect(snapshot.positions[0]).toMatchObject({
+        quantity: 10, availableQuantity: 6, frozenQuantity: 4,
+      });
+      expect(snapshot.positionsValueUsd).toBe(1000);
+      expect((await service.placeOrder(id, "USD", request)).order.id).toBe(bought.order.id);
+      await expect(service.placeOrder(id, "USD", {
+        ...request, idempotencyKey: "new-after-inactive",
+      })).rejects.toMatchObject({ code: "REAL_INSTRUMENT_NOT_TRADABLE" });
+
+      expect((await service.cancelOrder(id, "USD", buy.order.id)).portfolio.frozenCashUsd).toBe(0);
+      expect((await service.cancelOrder(id, "USD", sell.order.id)).portfolio.positions[0]?.availableQuantity).toBe(10);
+      expect((await service.cancelOrder(id, "USD", buy.order.id)).order.status).toBe("CANCELLED");
+      expect(await service.listTransactions(id)).toHaveLength(1);
+      const restarted = new RealTradingService(
+        await RealMarketRepository.create(client), 60000, 60000, () => now,
+      );
+      expect(await restarted.listOrders(id)).toHaveLength(3);
+      expect((await restarted.getSnapshot(id, "USD")).positions[0]?.quantity).toBe(10);
     } finally {
       await context.app.close();
     }

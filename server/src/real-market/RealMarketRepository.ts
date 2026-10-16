@@ -146,6 +146,12 @@ export class RealMarketRepository {
     return [...this.#instruments.values()].filter(i => i.isActive && i.market === market && i.sourcePage === page).map(i => structuredClone(i));
   }
 
+  /** 账本展示读取留存标的；行情列表和新交易仍使用仅返回活跃标的的查询。 */
+  getRecordedInstrumentById(instrumentId: string): RealInstrumentRecord | undefined {
+    const instrument = this.#instruments.get(instrumentId);
+    return instrument ? structuredClone(instrument) : undefined;
+  }
+
   getQuote(instrumentId: string): RealQuoteRecord | undefined {
     const quote = this.#quotes.get(instrumentId);
     return quote ? structuredClone(quote) : undefined;

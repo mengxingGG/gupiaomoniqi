@@ -510,6 +510,8 @@ fun OrdersScreen(
 ) {
     var orderPage by rememberSaveable(state.mode) { mutableStateOf(OrderPage.TRANSACTIONS) }
     var orderFilter by rememberSaveable(state.mode) { mutableStateOf(UiOrderStatus.OPEN.name) }
+    val sectionError = if (orderPage == OrderPage.TRANSACTIONS) state.transactionsError else state.ordersError
+    val sectionEmpty = if (orderPage == OrderPage.TRANSACTIONS) state.transactions.isEmpty() else state.orders.isEmpty()
     PullToRefreshContainer(
         refreshing = state.accountLoading,
         onRefresh = onRefresh,
@@ -545,13 +547,13 @@ fun OrdersScreen(
                     )
                 }
             }
-            if (state.accountError != null) {
-                item { ErrorPanel(state.accountError, onRetry = onRefresh) }
+            if (sectionError != null) {
+                item { ErrorPanel(sectionError, onRetry = onRefresh) }
             }
-            if (state.accountLoading && state.transactions.isEmpty() && state.orders.isEmpty()) {
+            if (state.accountLoading && sectionEmpty) {
                 item { LoadingPanel("正在同步订单…") }
             } else if (orderPage == OrderPage.TRANSACTIONS) {
-                if (state.transactions.isEmpty()) {
+                if (state.transactions.isEmpty() && sectionError == null) {
                     item { EmptyPanel("暂无成交", "买入或卖出后，流水会立即出现在这里。") }
                 } else {
                     items(state.transactions, key = { it.id }) { transaction ->
@@ -585,7 +587,7 @@ fun OrdersScreen(
                 val visibleOrders = state.orders.filter {
                     orderFilter == "ALL" || it.status.name == orderFilter
                 }
-                if (visibleOrders.isEmpty()) {
+                if (visibleOrders.isEmpty() && sectionError == null) {
                     item {
                         EmptyPanel(
                             title = if (orderFilter == UiOrderStatus.OPEN.name) "暂无进行中的委托" else "该分类暂无订单",

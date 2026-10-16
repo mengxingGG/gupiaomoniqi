@@ -245,6 +245,8 @@ data class AppUiState(
     val transactions: List<TransactionUi> = emptyList(),
     val orders: List<LimitOrderUi> = emptyList(),
     val ordersUnavailable: Boolean = false,
+    val transactionsError: String? = null,
+    val ordersError: String? = null,
     val accountLoading: Boolean = false,
     val accountError: String? = null,
     val cancellingOrderId: String? = null,
