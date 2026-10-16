@@ -3,6 +3,14 @@ package com.mengxinggg.gupiaomoniqi.ui
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
@@ -14,6 +22,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -21,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import com.mengxinggg.gupiaomoniqi.ui.components.AssistantSheet
 import com.mengxinggg.gupiaomoniqi.ui.components.AssistantManagementSheet
 import com.mengxinggg.gupiaomoniqi.ui.components.AssistantOrb
@@ -28,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleStartEffect
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mengxinggg.gupiaomoniqi.data.DefaultStockRepository
 import com.mengxinggg.gupiaomoniqi.ui.components.AppTopControls
@@ -57,9 +68,20 @@ fun StockSimulatorApp() {
     val factory = remember(repository) { AppViewModel.Factory(repository) }
     val viewModel: AppViewModel = viewModel(factory = factory)
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val pageStates = rememberSaveableStateHolder()
     var assistantOpen by rememberSaveable { mutableStateOf(false) }
     var assistantManagementOpen by rememberSaveable { mutableStateOf(false) }
     var assistantStatus by remember { mutableStateOf("idle") }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(repository, state.account?.username, state.mode, state.serverUrl, assistantOpen, assistantManagementOpen) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                kotlinx.coroutines.delay(2_000)
+                if (state.account != null && !assistantOpen && !assistantManagementOpen && com.mengxinggg.gupiaomoniqi.data.AppIdle.ready())
+                    repository.syncAssistantSnapshots(state.mode.name)
+            }
+        }
+    }
     LaunchedEffect(state.account?.username) { assistantOpen = false; assistantManagementOpen = false; assistantStatus = "idle" }
     val updateManager = remember(context.applicationContext) {
         AppUpdateManager(context.applicationContext)
@@ -185,10 +207,21 @@ fun StockSimulatorApp() {
             },
             snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { innerPadding ->
-            when (state.screen) {
+            val route = state.screen to if (state.screen == AppScreen.MAIN) state.selectedTab else MainTab.MARKET
+            AnimatedContent(targetState = route, modifier = Modifier.fillMaxSize(), transitionSpec = {
+                val direction = if (targetState.first == AppScreen.MAIN && initialState.first != AppScreen.MAIN) -1
+                    else if (targetState.first == AppScreen.MAIN && targetState.second.ordinal < initialState.second.ordinal) -1 else 1
+                (fadeIn(tween(210)) + slideInHorizontally(tween(280, easing = FastOutSlowInEasing)) { direction * it / 12 }) togetherWith
+                    (fadeOut(tween(150)) + slideOutHorizontally(tween(240, easing = FastOutSlowInEasing)) { -direction * it / 16 })
+            }, label = "页面切换") { page ->
+            // 离场页保留最后一帧数据，避免详情被清空后出现闪白；列表位置按页恢复。
+            var pageState by remember(page) { mutableStateOf(state) }
+            SideEffect { if (page == route) pageState = state }
+            pageStates.SaveableStateProvider("${page.first}-${page.second}") {
+            when (page.first) {
                 AppScreen.AUTH -> {
                     AuthScreen(
-                        state = state,
+                        state = pageState,
                         onBack = viewModel::closeAuth,
                         onModeChange = viewModel::changeAuthMode,
                         onSubmit = viewModel::authenticate,
@@ -203,7 +236,7 @@ fun StockSimulatorApp() {
                 }
                 AppScreen.DETAIL -> {
                     DetailScreen(
-                        state = state,
+                        state = pageState,
                         onBack = viewModel::closeDetail,
                         onRetry = viewModel::retryDetail,
                         onRangeChange = viewModel::changeChartRange,
@@ -212,10 +245,10 @@ fun StockSimulatorApp() {
                     )
                 }
                 AppScreen.MAIN -> {
-                    when (state.selectedTab) {
+                    when (page.second) {
                         MainTab.MARKET -> {
                             MarketScreen(
-                                state = state,
+                                state = pageState,
                                 onSearchChange = viewModel::setSearchQuery,
                                 onFilterChange = viewModel::setMarketFilter,
                                 onIndustryChange = viewModel::setIndustryFilter,
@@ -229,7 +262,7 @@ fun StockSimulatorApp() {
                         }
                         MainTab.WATCHLIST -> {
                             WatchlistScreen(
-                                state = state,
+                                state = pageState,
                                 onLogin = viewModel::openAuth,
                                 onRefresh = viewModel::refreshWatchlist,
                                 onOpenStock = viewModel::openStock,
@@ -239,7 +272,7 @@ fun StockSimulatorApp() {
                         }
                         MainTab.ORDERS -> {
                             OrdersScreen(
-                                state = state,
+                                state = pageState,
                                 onLogin = viewModel::openAuth,
                                 onRefresh = viewModel::refreshAccount,
                                 onOpenStock = viewModel::openStock,
@@ -249,7 +282,7 @@ fun StockSimulatorApp() {
                         }
                         MainTab.ASSETS -> {
                             AssetsScreen(
-                                state = state,
+                                state = pageState,
                                 onLogin = viewModel::openAuth,
                                 onRefresh = viewModel::refreshAccount,
                                 onLogout = viewModel::logout,
@@ -261,6 +294,8 @@ fun StockSimulatorApp() {
                         }
                     }
                 }
+            }
+            }
             }
         }
 
@@ -275,7 +310,7 @@ fun StockSimulatorApp() {
                 onDismiss = { assistantManagementOpen = false; viewModel.openSettings() })
             if (state.account != null) AssistantSheet(visible = assistantOpen, repository = repository,
                 mode = state.mode.name, instrumentId = if (state.screen == AppScreen.DETAIL) state.selectedStock?.id else null,
-                onStatusChange = { assistantStatus = it }, onDismiss = { assistantOpen = false })
+                onStatusChange = { assistantStatus = it }, onDismiss = { assistantOpen = false }, onTradeCompleted = viewModel::refreshAccount)
         }
 
         if (state.tradeSheet != null) {

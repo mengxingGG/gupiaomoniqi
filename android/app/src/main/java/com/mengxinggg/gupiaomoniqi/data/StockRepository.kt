@@ -33,6 +33,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 interface StockRepository {
+    suspend fun assistantSnapshotHints(mode: String, text: String): JSONObject? = null
     suspend fun assistantRequest(path: String = "", method: String = "GET", body: JSONObject? = null): JSONObject =
         throw UnsupportedOperationException("AI 助手不可用")
     var baseUrl: String
@@ -135,13 +136,32 @@ interface StockRepository {
 class DefaultStockRepository(
     private val apiClient: ApiClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val assistantCache: AssistantMarketCache? = null,
 ) : StockRepository {
+    private val foregroundRequests = java.util.concurrent.atomic.AtomicInteger(0)
+    private var snapshotRetryAt = 0L
+    override suspend fun assistantSnapshotHints(mode: String, text: String): JSONObject? = withContext(ioDispatcher) {
+        assistantCache?.hints(baseUrl, mode, text, System.currentTimeMillis())
+    }
+    suspend fun syncAssistantSnapshots(mode: String) = withContext(ioDispatcher) {
+        val cache = assistantCache ?: return@withContext
+        val now = System.currentTimeMillis()
+        if (!hasSession || foregroundRequests.get() > 0 || now < snapshotRetryAt) return@withContext
+        val server = baseUrl; val cursor = cache.cursor(server, mode, now)
+        if (now < cursor.nextAt) return@withContext
+        try {
+            val page = apiClient.assistantSnapshots(mode, cursor.after)
+            if (baseUrl == server && hasSession) cache.save(server, mode, cursor, page, System.currentTimeMillis())
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { snapshotRetryAt = now + 60_000 }
+    }
     override suspend fun assistantRequest(path: String, method: String, body: JSONObject?): JSONObject =
         io { apiClient.assistantRequest(path, method, body) }
     constructor(context: Context) : this(
         ApiClient(
             EncryptedTokenStore(context.applicationContext),
         ),
+        assistantCache = AssistantMarketCache(context.applicationContext),
     )
 
     override var baseUrl: String
@@ -304,6 +324,8 @@ class DefaultStockRepository(
     ): RewardClaimResult =
         io { apiClient.redeemGiftCode(mode, code, idempotencyKey) }
 
-    private suspend fun <T> io(block: () -> T): T =
-        withContext(ioDispatcher) { block() }
+    private suspend fun <T> io(block: () -> T): T = withContext(ioDispatcher) {
+        foregroundRequests.incrementAndGet()
+        try { block() } finally { foregroundRequests.decrementAndGet() }
+    }
 }

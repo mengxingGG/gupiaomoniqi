@@ -674,6 +674,11 @@ class ApiClient(
         }
     }
 
+    fun assistantSnapshots(mode: String, after: String): JSONObject {
+        require(mode == "VIRTUAL" || mode == "REAL")
+        return requestObject(path = "/api/assistant/market-snapshots", query = mapOf("mode" to mode, "after" to after, "limit" to "50")) { it }
+    }
+
     private fun <T> requestObject(
         path: String,
         method: String = "GET",
@@ -759,8 +764,11 @@ class ApiClient(
         }
         val configuredBaseUrl = requestSettings.first
         val authorizedToken = requestSettings.second
+        // Android 的空 DELETE 可能被系统附上非 JSON 媒体类型，Fastify 会返回 415。
+        // 显式发送空 JSON 也覆盖撤单等同类接口，避免依赖设备默认行为。
+        val requestBody = body ?: if (method == "DELETE") JSONObject() else null
         val headers = linkedMapOf("Accept" to "application/json")
-        if (body != null) {
+        if (requestBody != null) {
             headers["Content-Type"] = "application/json; charset=utf-8"
         }
         if (authorizedToken != null) {
@@ -781,7 +789,7 @@ class ApiClient(
                     method = method,
                     url = ApiUrl.build(configuredBaseUrl, path, query),
                     headers = headers,
-                    body = body?.toString(),
+                    body = requestBody?.toString(),
                 ),
             ),
             authorizedToken = authorizedToken,

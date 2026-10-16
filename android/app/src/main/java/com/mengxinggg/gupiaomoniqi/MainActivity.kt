@@ -10,6 +10,10 @@ import com.mengxinggg.gupiaomoniqi.data.EncryptedTokenStore
 import com.mengxinggg.gupiaomoniqi.update.AppUpdateScheduler
 
 class MainActivity : ComponentActivity() {
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        com.mengxinggg.gupiaomoniqi.data.AppIdle.touch()
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyDebugServerOverride(intent)

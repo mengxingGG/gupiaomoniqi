@@ -1,16 +1,22 @@
-export type ReasoningEffort = "auto" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type AssistantProvider = "openai-chat" | "openai-responses" | "deepseek" | "anthropic";
+export type SearchProvider = "exa-free" | "exa-api" | "bing";
+export type ReasoningEffort = "auto" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export interface AssistantSettings {
+  provider: AssistantProvider;
   baseUrl: string;
   model: string;
   hasKey: boolean;
   contextTokens: number;
-  modelContextTokens: number;
   reasoning: ReasoningEffort;
   toolsEnabled: boolean;
+  claudeThinkingMode: "adaptive" | "budget";
+  searchProvider: SearchProvider;
+  hasSearchKey: boolean;
 }
 export interface AssistantScope {
   mode: "VIRTUAL" | "REAL";
   instrumentId?: string;
+  market?: boolean;
   portfolio: boolean;
   transactions: boolean;
   watchlist: boolean;
@@ -24,6 +30,30 @@ export interface AssistantMessage {
   model?: string;
   sources?: { title: string; url: string }[];
 }
+export interface AssistantTradeProposal {
+  id: string;
+  messageId: string;
+  callId: string;
+  mode: "VIRTUAL" | "REAL";
+  instrumentId: string;
+  name: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  quantity: number;
+  orderMode: "MARKET" | "LIMIT";
+  limitPrice?: number;
+  quoteCurrency: string;
+  referencePrice: number;
+  quoteTime: string;
+  estimatedAmount: number;
+  reason: string;
+  createdAt: string;
+  expiresAt: string;
+  status: "pending" | "executing" | "submitted" | "rejected" | "expired" | "failed" | "uncertain";
+  approvedAt?: string;
+  error?: string;
+  result?: { orderId: string; status: "OPEN" | "FILLED" | "CANCELLED"; filledQuantity: number; price?: number; feeUsd?: number };
+}
 export interface AssistantSession {
   id: string;
   title: string;
@@ -31,6 +61,7 @@ export interface AssistantSession {
   scope: AssistantScope;
   messages: AssistantMessage[];
   updatedAt: string;
+  tradeProposals?: AssistantTradeProposal[];
   task?: {
     id: string;
     status: "running" | "complete" | "stopped" | "error";

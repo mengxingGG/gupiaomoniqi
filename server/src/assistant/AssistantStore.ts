@@ -6,12 +6,17 @@ import type { AssistantMemory, AssistantSession, AssistantSettings } from "@gupi
 interface AccountState {
   settings: AssistantSettings;
   secret: string;
+  searchSecret: string;
+  // 协议续接信息加密保存，不随公开会话接口返回。
+  continuations: Record<string, { fingerprint: string; payload: string }>;
+  contextSummaries: Record<string, { throughMessageId: string; payload: string }>;
   memoryEnabled: boolean;
   memoryEpoch: number;
   sessions: AssistantSession[];
 }
-const defaults: AssistantSettings = { baseUrl: "https://api.openai.com/v1", model: "", hasKey: false,
-  contextTokens: 256000, modelContextTokens: 32000, reasoning: "auto", toolsEnabled: true };
+const defaults: AssistantSettings = { provider: "openai-chat", baseUrl: "https://api.openai.com/v1", model: "", hasKey: false,
+  contextTokens: 256000, reasoning: "auto", toolsEnabled: true,
+  claudeThinkingMode: "adaptive", searchProvider: "exa-free", hasSearchKey: false };
 
 export class AssistantError extends Error {
   constructor(message: string, readonly statusCode = 400) { super(message); }
@@ -42,12 +47,19 @@ export class AssistantStore {
   }
   read(id: string): AccountState {
     const file = join(this.folder(id), "state.json");
-    if (!existsSync(file)) return { settings: { ...defaults }, secret: "", memoryEnabled: true, memoryEpoch: 0, sessions: [] };
-    return JSON.parse(readFileSync(file, "utf8")) as AccountState;
+    if (!existsSync(file)) return { settings: { ...defaults }, secret: "", searchSecret: "", continuations: {}, contextSummaries: {}, memoryEnabled: true, memoryEpoch: 0, sessions: [] };
+    const state = JSON.parse(readFileSync(file, "utf8")) as AccountState;
+    // 旧版的容量上限不再生效，用户选择的窗口是唯一预算。
+    const { modelContextTokens: _legacyCapacity, ...settings } = state.settings as AssistantSettings & { modelContextTokens?: number };
+    return { ...state, settings: { ...defaults, ...settings }, searchSecret: state.searchSecret ?? "", continuations: state.continuations ?? {}, contextSummaries: state.contextSummaries ?? {} };
   }
   change<T>(id: string, fn: (state: AccountState) => T): T {
     const state = this.read(id);
     const result = fn(state);
+    const retained = new Set(state.sessions.flatMap(s => s.messages.map(m => m.id)));
+    for (const id of Object.keys(state.continuations)) if (!retained.has(id)) delete state.continuations[id];
+    const sessions = new Set(state.sessions.map(s => s.id));
+    for (const id of Object.keys(state.contextSummaries)) if (!sessions.has(id)) delete state.contextSummaries[id];
     this.atomic(join(this.folder(id), "state.json"), JSON.stringify(state));
     return result;
   }

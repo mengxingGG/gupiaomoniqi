@@ -22,6 +22,33 @@ private const val TEST_BASE_URL = "http://10.0.2.2:3100"
 
 class ApiClientContractTest {
     @Test
+    fun `snapshot paging uses encoded query parameters and bearer identity`() {
+        lateinit var recorded: HttpRequest
+        val client = ApiClient(InMemoryTokenStore("token", TEST_BASE_URL)) { request ->
+            recorded = request; HttpResponse(200, """{"data":{"mode":"REAL","items":[],"nextAfter":null}}""")
+        }
+        assertEquals("REAL", client.assistantSnapshots("REAL", "hk/1&mode=VIRTUAL").getString("mode"))
+        assertEquals("$TEST_BASE_URL/api/assistant/market-snapshots?mode=REAL&after=hk%2F1%26mode%3DVIRTUAL&limit=50", recorded.url)
+        assertEquals("GET", recorded.method); assertEquals("Bearer token", recorded.headers["Authorization"])
+        assertThrows(IllegalArgumentException::class.java) { client.assistantSnapshots("OTHER", "") }
+    }
+    @Test
+    fun `assistant deletion sends explicit JSON instead of an ambiguous empty DELETE`() {
+        lateinit var recorded: HttpRequest
+        val client = ApiClient(InMemoryTokenStore("token", TEST_BASE_URL)) { request ->
+            recorded = request
+            HttpResponse(200, """{"data":{"deleted":true}}""")
+        }
+        val id = "11111111-1111-4111-8111-111111111111"
+        assertTrue(client.assistantRequest("/sessions/$id", "DELETE").getBoolean("deleted"))
+        assertEquals("DELETE", recorded.method)
+        assertEquals("$TEST_BASE_URL/api/assistant/sessions/$id", recorded.url)
+        assertEquals("application/json; charset=utf-8", recorded.headers["Content-Type"])
+        assertEquals("{}", recorded.body)
+        assertEquals("Bearer token", recorded.headers["Authorization"])
+    }
+
+    @Test
     fun `limit order submission sends price and idempotency key to global order endpoint`() {
         lateinit var recorded: HttpRequest
         val client = ApiClient(
@@ -90,7 +117,8 @@ class ApiClientContractTest {
             "$TEST_BASE_URL/api/orders/order%2F1?mode=REAL",
             requests[1].url,
         )
-        assertNull(requests[1].body)
+        assertEquals("{}", requests[1].body)
+        assertEquals("application/json; charset=utf-8", requests[1].headers["Content-Type"])
         assertEquals(LimitOrderStatus.CANCELLED, cancellation.order.status)
     }
 

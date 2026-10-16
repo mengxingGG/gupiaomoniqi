@@ -58,8 +58,8 @@ import { RepositoryLLMTradingPort } from "./ai/RepositoryLLMTradingPort.js";
 import { AppUpdateService } from "./app-update/AppUpdateService.js";
 import { registerAppUpdateRoutes } from "./app-update/registerAppUpdateRoutes.js";
 import { AssistantService } from "./assistant/AssistantService.js";
+import { MarketSnapshots, snapshotQuery } from "./assistant/MarketSnapshots.js";
 import { AssistantError } from "./assistant/AssistantStore.js";
-import { searchWeb } from "./assistant/WebSearch.js";
 import {
   GAME_RULES,
   LOAD_CONTROLLER_CONFIG,
@@ -778,11 +778,54 @@ export async function createApplication(
   });
 
   registerAppUpdateRoutes(app, appUpdateService);
+  const assistantSnapshots = new MarketSnapshots({
+    stocks: mode => mode === "REAL" ? realRepository.listInstruments() : repository.listInstruments(),
+    quote: (mode, id) => mode === "REAL" ? realRepository.getQuote(id) : repository.getQuote(id),
+    days: async (mode, id) => mode === "REAL" ? realRepository.listCandles(id, "DAY", 7) :
+      repository.loadCandles ? repository.loadCandles(id, "DAY", 7) : repository.listCandles(id, "DAY").slice(-7),
+  }, clock);
   const assistant = new AssistantService(options.assistantDirectory ?? process.env.ASSISTANT_DATA_DIR ??
     (process.env.DATABASE_DIR ? join(dirname(resolve(process.env.DATABASE_DIR)), "assistant") : fileURLToPath(new URL("../data/assistant", import.meta.url))), {
+    snapshots: async query => assistantSnapshots.page(snapshotQuery.parse(query)),
+    trades: {
+      async preview(accountId, mode, request) {
+        if (!repository.getAccountById(accountId)) throw new AssistantError("账户不存在", 404);
+        const source = mode === "REAL" ? realRepository : repository;
+        const instrument = source.getInstrumentById(request.instrumentId), quote = source.getQuote(request.instrumentId);
+        if (!instrument || !quote || !Number.isFinite(quote.currentPrice) || quote.currentPrice <= 0)
+          throw new AssistantError("该标的暂时没有可用报价，请先刷新行情");
+        if (!instrument.isTradable) throw new AssistantError("该标的当前不可交易");
+        if (request.quantity % instrument.lotSize !== 0) throw new AssistantError(`委托数量须为 ${instrument.lotSize} 股的整数倍`);
+        return { name: instrument.name, symbol: instrument.symbol, quoteCurrency: quote.quoteCurrency,
+          referencePrice: quote.currentPrice, quoteTime: quote.updatedAt };
+      },
+      async execute(accountId, mode, request) {
+        const account = repository.getAccountById(accountId);
+        if (!account) throw new AssistantError("账户不存在", 404);
+        try {
+          return mode === "REAL" ? await realTradingService.placeOrder(accountId, account.displayCurrency, request) :
+            await tradeService.placeOrder(accountId, request);
+        } catch (error) {
+          if (error instanceof TradeError || error instanceof RealTradeError) throw new AssistantError(error.message, error.statusCode);
+          throw error;
+        }
+      },
+    },
     async read(accountId, scope, name, args) {
       const source = scope.mode === "REAL" ? realRepository : repository;
       const instrumentId = typeof args.instrumentId === "string" ? args.instrumentId : scope.instrumentId;
+      if (["market_scan", "market_detail", "market_quote", "market_chart", "screen_stocks"].includes(name) && scope.market === false)
+        throw new AssistantError("全部股票行情权限已关闭");
+      if (name === "market_scan") return assistantSnapshots.page({ ...snapshotQuery.parse({ ...args, mode: scope.mode }), limit: Math.min(Number(args.limit) || 10, 20) });
+      if (name === "market_detail") {
+        if (!instrumentId || !source.getInstrumentById(instrumentId)) throw new AssistantError("未找到该股票，请先搜索名称或代码");
+        const service = scope.mode === "REAL" ? realMarketDetailService : marketDetailService;
+        const range = z.enum(["INTRADAY", "DAY", "MONTH", "YEAR"]).parse(args.range ?? "DAY");
+        const chart = await service.getChart(instrumentId, range);
+        const orderBook = args.orderBook === true ? await service.getOrderBook(instrumentId) : undefined;
+        return { mode: scope.mode, instrument: source.getInstrumentById(instrumentId), quote: source.getQuote(instrumentId),
+          chart: chart ? { ...chart, candles: chart.candles.slice(-80) } : null, orderBook, notice: "最多返回最后80根已有K线；盘口仅在请求时获取" };
+      }
       if (name === "market_quote") {
         if (!instrumentId) throw new AssistantError("请提供标的 ID，或先通过筛选查找标的");
         return { mode: scope.mode, instrument: source.getInstrumentById(instrumentId), quote: source.getQuote(instrumentId), asOf: clock().toISOString() };
@@ -807,15 +850,14 @@ export async function createApplication(
           return [{ id: i.id, name: i.name, symbol: i.symbol, market: i.market, industry: i.industry, quote: q }];
         });
         return { mode: scope.mode, filters: input, universe: universe.length, withQuotes, matched: matches.length, returned: Math.min(20, matches.length),
-          notice: "仅覆盖本服务已收录且有报价的股票，按涨跌幅降序返回前20项，不代表全市场或投资推荐", stocks: matches.sort((a,b) => b.quote.changePercent - a.quote.changePercent).slice(0,20) };
+          notice: "仅覆盖本服务已收录且有报价的股票，按涨跌幅降序返回前20项；筛选结果仍需结合走势与资料分析", stocks: matches.sort((a,b) => b.quote.changePercent - a.quote.changePercent).slice(0,20) };
       }
       if (name === "portfolio" && scope.portfolio) return scope.mode === "REAL" ? realTradingService.getSnapshot(accountId, repository.getAccountById(accountId)?.displayCurrency ?? "USD") : portfolioService.getSnapshot(accountId);
       if (name === "transactions" && scope.transactions) {
         const records = scope.mode === "REAL" ? await realTradingService.listTransactions(accountId) : repository.listTransactions(repository.getPortfolioByAccountId(accountId)!.id);
         return { mode: scope.mode, transactions: records.slice(0, 50), notice: "最多返回最近50笔成交" };
       }
-      if (name === "watchlist" && scope.watchlist) return { mode: scope.mode, items: (await accountFeatureStore.listWatchlist(accountId, scope.mode)).map(x => source.getInstrumentById(x.instrumentId)) };
-      if (name === "web_search" && scope.web && scope.mode === "REAL") return searchWeb(z.string().trim().min(1).max(200).parse(args.query));
+      if (name === "watchlist" && scope.watchlist) return { mode: scope.mode, items: (await accountFeatureStore.listWatchlist(accountId, scope.mode)).map(x => ({ instrument: source.getInstrumentById(x.instrumentId), quote: source.getQuote(x.instrumentId) })), notice: "自选速查；其他股票请用market_scan搜索，再按需market_detail" };
       throw new AssistantError("此项数据未获授权");
     },
   });
