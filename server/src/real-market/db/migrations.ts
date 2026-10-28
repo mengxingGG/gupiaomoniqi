@@ -300,6 +300,24 @@ const REAL_MARKET_MIGRATIONS = [
     version: 5,
     sql: `ALTER TABLE real_quotes ADD COLUMN IF NOT EXISTS data_provider TEXT NOT NULL DEFAULT 'EASTMONEY';`,
   },
+  {
+    version: 6,
+    sql: `
+      ALTER TABLE real_instruments ALTER COLUMN source_updated_at DROP NOT NULL;
+      ALTER TABLE real_quotes ALTER COLUMN source_updated_at DROP NOT NULL;
+      ALTER TABLE real_candles ADD COLUMN IF NOT EXISTS data_provider TEXT;
+      UPDATE real_candles SET data_provider = CASE
+        WHEN source = 'REAL_TENCENT_HISTORY' THEN 'TENCENT'
+        WHEN source = 'REAL_PROVIDER_HISTORY' THEN 'EASTMONEY'
+        ELSE NULL END WHERE data_provider IS NULL;
+      -- Legacy releases substituted receive time when f124 was missing. Equality
+      -- is ambiguous, so conservatively mark it unknown without changing prices.
+      UPDATE real_quotes SET source_updated_at = NULL
+        WHERE data_provider = 'EASTMONEY' AND source_updated_at = received_at;
+      UPDATE real_instruments SET source_updated_at = NULL
+        WHERE source_updated_at = updated_at;
+    `,
+  },
 ] as const;
 
 export async function migrateRealDatabase(

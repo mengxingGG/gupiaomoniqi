@@ -26,6 +26,7 @@ data class Candle(
     val averagePrice: Double? = null,
     val source: CandleSource,
     val isPartial: Boolean,
+    val dataProvider: String? = null,
 )
 
 enum class ChartSource {

@@ -13,10 +13,12 @@ import {
   REAL_MARKETS,
 } from "./EastmoneyProvider.js";
 import { RealMarketRepository } from "./RealMarketRepository.js";
+import { isMarketTradingTime, quoteMaximumAgeMs } from "./tradingHours.js";
 import type { SupplementalMarketProvider } from "./SupplementalMarketProvider.js";
 import type {
   ProviderPage,
   ProviderPageDescriptor,
+  RealQuoteRecord,
 } from "./types.js";
 
 type RealMarketRuntimeConfig = typeof REAL_MARKET_CONFIG;
@@ -275,7 +277,8 @@ export class RealMarketRuntime {
         this.#abortController.signal,
       );
       if (!candles.length) throw new Error("主源未返回有效历史");
-      await this.repository.upsertCandles(candles);
+      // 替换相同历史窗口，避免主/备用源切换后保留同一周期的两套桶。
+      await this.repository.replaceHistoryWindow(candles);
       return { fetched: candles.length > 0, error: null };
     } catch (error) {
       if (this.supplemental && !this.#stopped) {
@@ -528,10 +531,10 @@ export class RealMarketRuntime {
     let lastError = "未知错误";
     for (let attempt = 1; attempt <= 3 && !this.#stopped; attempt += 1) {
       try {
-        const page = await this.#fetchRawPage(descriptor);
+        let page = await this.#fetchRawPage(descriptor);
         const hotIds = this.#hotIdsForPage(descriptor);
         await this.#enqueuePageWrite(async () => {
-          await this.repository.upsertProviderPage(
+          page = await this.#persistResolvedPage(
             page,
             sweepId,
             hotIds,
@@ -634,9 +637,9 @@ export class RealMarketRuntime {
 
             const requestedAt = this.clock().toISOString();
             try {
-              const page = await this.#fetchRawPage(descriptor);
+              let page = await this.#fetchRawPage(descriptor);
               await this.#enqueuePageWrite(async () => {
-                await this.repository.upsertProviderPage(
+                page = await this.#persistResolvedPage(
                   page,
                   null,
                   instrumentIds,
@@ -663,6 +666,17 @@ export class RealMarketRuntime {
     }
   }
 
+  async #persistResolvedPage(page: ProviderPage, sweepId: string | null, hotIds: ReadonlySet<string>, supplemental = false): Promise<ProviderPage> {
+    if (typeof this.repository.upsertProviderPageResolved === "function") {
+      return this.repository.upsertProviderPageResolved(page, sweepId, hotIds, supplemental);
+    }
+    // Compatibility for legacy empty-page repository adapters: never emit an
+    // unresolved nonempty page when identity resolution is unavailable.
+    if (page.items.length) throw new Error("Repository cannot resolve provider identities");
+    await this.repository.upsertProviderPage(page, sweepId, hotIds, supplemental);
+    return page;
+  }
+
   #enqueuePageWrite(work: () => Promise<void>): Promise<void> {
     const operation = this.#writeQueue.then(async () => {
       try {
@@ -677,15 +691,37 @@ export class RealMarketRuntime {
 
   async #repairQuoteGaps(descriptor: ProviderPageDescriptor, requestedAt: string, primary?: ProviderPage, onlyIds?: ReadonlySet<string>) {
     if (!this.supplemental || this.#stopped) return;
-    const candidates = primary ? primary.items.filter(item => !item.quote).map(item => item.instrument)
+    const requestedAtMs = new Date(requestedAt).getTime();
+    const isQuoteStale = (quote: RealQuoteRecord | null | undefined): boolean => {
+      if (!quote) return true;
+      const sourceUpdatedAt = Date.parse(quote.updatedAt);
+      if (!Number.isFinite(sourceUpdatedAt)) return true;
+      // 收市期间的静止价格本身是有效的东财快照，不因时间流逝强行切备用源。
+      if (!isMarketTradingTime(quote.market, new Date(requestedAtMs))) return false;
+      return requestedAtMs - sourceUpdatedAt > quoteMaximumAgeMs(
+          quote.market,
+          new Date(requestedAtMs),
+          this.config.quoteMaximumReceiveAgeMs,
+          this.config.quoteMaximumReceiveAgeOffHoursMs,
+        );
+    };
+    const candidates = primary ? primary.items.filter(item => isQuoteStale(item.quote)).map(item => item.instrument)
       : this.repository.listInstrumentsForPage(descriptor.market, descriptor.page);
+    // 本次主源明确缺价或整页失败时，即使缓存尚未超时，也应尝试备用源。
+    const missingFromPrimary = new Set(primary
+      ? primary.items.filter(item => !item.quote).map(item => item.instrument.id)
+      : candidates.map(item => item.id));
     if (primary && primary.items.length < Math.min(primary.pageSize, Math.max(0, primary.providerTotal - (primary.page - 1) * primary.pageSize))) {
       const present = new Set(primary.items.map(item => item.instrument.id));
-      candidates.push(...this.repository.listInstrumentsForPage(descriptor.market, descriptor.page).filter(i => !present.has(i.id)));
+      const omitted = this.repository.listInstrumentsForPage(descriptor.market, descriptor.page).filter(i => !present.has(i.id));
+      for (const item of omitted) missingFromPrimary.add(item.id);
+      candidates.push(...omitted);
     }
-    const missing = candidates.filter(i => (!onlyIds || onlyIds.has(i.id)) &&
-      (!this.repository.getQuote(i.id) || this.repository.getQuote(i.id)!.receivedAt < requestedAt));
+    const missing = [...new Map(candidates.filter(i => (!onlyIds || onlyIds.has(i.id)) &&
+      (missingFromPrimary.has(i.id) || isQuoteStale(this.repository.getQuote(i.id))))
+      .map(i => [i.id, i])).values()];
     if (!missing.length) return;
+    const observed = new Map(missing.map(i => [i.id, this.repository.getQuote(i.id)]));
     try {
       const quotes = await this.supplemental.fetchQuotes(missing, this.#abortController.signal);
       if (this.#stopped) return;
@@ -693,13 +729,22 @@ export class RealMarketRuntime {
         // 网络等待期间主源可能已恢复：提交前再次核对，成功数据绝不被补缺覆盖。
         const requested = new Map(missing.map(i => [i.id, i]));
         const items = quotes.flatMap(quote => {
-          const instrument = requested.get(quote.instrumentId); const current = this.repository.getQuote(quote.instrumentId);
-          if (!instrument || current && (current.receivedAt >= requestedAt || current.updatedAt > quote.updatedAt)) return [];
+          const instrument = requested.get(quote.instrumentId);
+          const current = this.repository.getQuote(quote.instrumentId);
+          const before = observed.get(quote.instrumentId);
+          const sourceUpdatedAt = Date.parse(quote.updatedAt);
+          if (!instrument || !Number.isFinite(sourceUpdatedAt)) return [];
+          // 请求期间主源若已恢复且报价已变化，保持东财优先；不以较旧备用价倒退。
+          if (current?.dataProvider === "EASTMONEY" &&
+            (!before || current.updatedAt !== before.updatedAt || current.receivedAt !== before.receivedAt ||
+              current.currentPrice !== before.currentPrice || before.dataProvider !== current.dataProvider)) return [];
+          if (current && (Date.parse(current.updatedAt) > sourceUpdatedAt ||
+            Date.parse(current.updatedAt) === sourceUpdatedAt && !missingFromPrimary.has(instrument.id))) return [];
           return [{ instrument, quote }];
         });
         if (!items.length) return;
-        const page: ProviderPage = { ...descriptor, pageSize: this.config.pageSize, providerTotal: 0, durationMs: 0, receivedAt: this.clock().toISOString(), items };
-        await this.repository.upsertProviderPage(page, null, onlyIds ?? this.#hotIdsForPage(descriptor), true);
+        let page: ProviderPage = { ...descriptor, pageSize: this.config.pageSize, providerTotal: 0, durationMs: 0, receivedAt: this.clock().toISOString(), items };
+        page = await this.#persistResolvedPage(page, null, onlyIds ?? this.#hotIdsForPage(descriptor), true);
         this.#gapFill.quotes += items.length; this.#gapFill.lastSuccessAt = page.receivedAt;
         this.#emitPage(page);
       });

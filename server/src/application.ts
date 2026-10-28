@@ -464,7 +464,13 @@ export async function createApplication(
         hotPagesPerRound: realRuntimeConfig.hotPagesPerRound,
         fullSweepTargetMs: realRuntimeConfig.fullSweepTargetMs,
       },
-    new SupplementalMarketProvider({ fetchImplementation: options.realFetchImplementation, requestTimeoutMs: realRuntimeConfig.requestTimeoutMs, clock }),
+    new SupplementalMarketProvider({
+      fetchImplementation: options.realFetchImplementation,
+      requestTimeoutMs: realRuntimeConfig.requestTimeoutMs,
+      quoteMaximumReceiveAgeMs: realRuntimeConfig.quoteMaximumReceiveAgeMs,
+      quoteMaximumReceiveAgeOffHoursMs: realRuntimeConfig.quoteMaximumReceiveAgeOffHoursMs,
+      clock,
+    }),
   );
   startupLog("initializing real runtime");
   await realRuntime.initialize();

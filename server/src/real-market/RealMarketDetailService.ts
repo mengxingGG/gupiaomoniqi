@@ -63,7 +63,13 @@ export class RealMarketDetailService {
           "该市场暂未返回历史数据；系统不会生成虚假 K 线"
         : !hasProviderHistory && providerError
           ? `历史接口暂不可用，当前仅展示本地持续记录的真实快照：${summarizedError}`
-          : selected.some(c => c.source === "REAL_TENCENT_HISTORY") ? "东方财富历史暂缺，已按本股票与周期补取腾讯前复权历史" : null;
+          : selected.some(c => c.source === "REAL_TENCENT_HISTORY")
+            ? range === "INTRADAY"
+              ? "东方财富分时历史暂缺，已补取腾讯分钟历史"
+              : "东方财富历史暂缺，已按本股票与周期补取腾讯前复权历史"
+            : !hasProviderHistory
+              ? "当前仅展示本地持续记录的真实供应商快照，非完整历史；每根 K 线保留其来源，不与前复权历史拼接"
+              : null;
 
     return {
       instrumentId,
@@ -72,7 +78,7 @@ export class RealMarketDetailService {
       source: "REAL_MARKET_RECORDED",
       candles: selected.map(toPublicCandle),
       coverageStart: selected[0]?.time ?? null,
-      updatedAt: quote.receivedAt,
+      updatedAt: selected.reduce((latest, candle) => candle.updatedAt > latest ? candle.updatedAt : latest, quote.receivedAt),
       referencePrice: quote.previousClose,
       complete: hasProviderHistory,
       notice: notice ?? undefined,

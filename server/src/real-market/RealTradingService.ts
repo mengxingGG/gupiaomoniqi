@@ -24,11 +24,9 @@ import {
   roundUnitPrice,
 } from "../domain/money.js";
 import { RealMarketRepository } from "./RealMarketRepository.js";
-import { quoteMaximumAgeMs } from "./tradingHours.js";
 import type {
   RealPortfolioRecord,
   RealPositionRecord,
-  RealQuoteRecord,
 } from "./types.js";
 
 export class RealTradeError extends Error {
@@ -47,24 +45,10 @@ export class RealTradingService {
 
   constructor(
     private readonly repository: RealMarketRepository,
-    private readonly quoteMaximumReceiveAgeMs: number,
-    private readonly quoteMaximumReceiveAgeOffHoursMs: number,
+    _quoteMaximumReceiveAgeMs: number,
+    _quoteMaximumReceiveAgeOffHoursMs: number,
     private readonly clock: () => Date = () => new Date(),
   ) {}
-
-  /**
-   * 行情新鲜度阈值：交易时段内严格要求（quoteMaximumReceiveAgeMs），
-   * 盘前/盘后/午休/周末等非交易时段放宽（quoteMaximumReceiveAgeOffHoursMs），
-   * 避免非热门股票因全量扫描周期大于严格窗口而周期性无法交易。
-   */
-  #quoteMaximumAgeFor(quote: RealQuoteRecord): number {
-    return quoteMaximumAgeMs(
-      quote.market,
-      this.clock(),
-      this.quoteMaximumReceiveAgeMs,
-      this.quoteMaximumReceiveAgeOffHoursMs,
-    );
-  }
 
   async getSnapshot(
     accountId: string,
@@ -204,10 +188,7 @@ export class RealTradingService {
         }
       }
 
-      const { instrument, quote } = this.#validateOrderRequest(
-        request,
-        now,
-      );
+      const { instrument, quote } = this.#validateOrderRequest(request);
 
       const createdAt = now.toISOString();
       const order: RealOrderRecord = {
@@ -288,6 +269,7 @@ export class RealTradingService {
             );
             const gross = roundMoney(priceUsd * request.quantity);
             const reserve = roundMoney(gross + realTradeFee(gross));
+            assertRealTradeAmounts(priceUsd, gross, reserve);
             if (lockedPortfolio.available_cash_usd < reserve) {
               throw new RealTradeError(
                 "INSUFFICIENT_CASH",
@@ -514,20 +496,14 @@ export class RealTradingService {
       );
       let filled = 0;
       for (const order of open.rows) {
-        const quote = this.repository.getQuote(order.instrument_id);
-        if (!quote || !realOrderRowCrosses(order, quote.currentPrice)) {
-          continue;
-        }
-        if (
-          this.clock().getTime() - new Date(quote.receivedAt).getTime() >
-          this.#quoteMaximumAgeFor(quote)
-        ) {
-          continue;
-        }
         const instrument = this.repository.getInstrumentById(
           order.instrument_id,
         );
-        if (!instrument) {
+        if (!instrument || !instrument.isTradable) {
+          continue;
+        }
+        const quote = this.repository.getQuote(order.instrument_id);
+        if (!quote || !Number.isFinite(quote.currentPrice) || quote.currentPrice <= 0 || !realOrderRowCrosses(order, quote.currentPrice)) {
           continue;
         }
         const result = await this.#fillReservedOrder(
@@ -557,21 +533,11 @@ export class RealTradingService {
     );
     const quote = this.repository.getQuote(request.instrumentId);
 
-    if (!instrument || !quote || !instrument.isTradable) {
+    if (!instrument || !quote || !instrument.isTradable || !Number.isFinite(quote.currentPrice) || quote.currentPrice <= 0) {
       throw new RealTradeError(
         "REAL_INSTRUMENT_NOT_TRADABLE",
         "这只真实股票当前没有可交易的真实报价",
         404,
-      );
-    }
-    if (
-      now.getTime() - new Date(quote.receivedAt).getTime() >
-      this.#quoteMaximumAgeFor(quote)
-    ) {
-      throw new RealTradeError(
-        "REAL_QUOTE_STALE",
-        "真实行情已经过期，请等待东方财富同步恢复后再交易",
-        409,
       );
     }
     if (
@@ -660,6 +626,7 @@ export class RealTradingService {
           ),
         );
         const transactionId = randomUUID();
+        assertRealTradeAmounts(priceUsd, grossAmountUsd, grossAmountUsd + feeUsd);
         let availableCashUsd = currentPortfolio.available_cash_usd;
         let position: RealPositionRecord | null;
         let netAmountUsd: number;
@@ -852,26 +819,16 @@ export class RealTradingService {
     return operation;
   }
 
-  #validateOrderRequest(request: TradeRequest, now: Date) {
+  #validateOrderRequest(request: TradeRequest) {
     const instrument = this.repository.getInstrumentById(
       request.instrumentId,
     );
     const quote = this.repository.getQuote(request.instrumentId);
-    if (!instrument || !quote || !instrument.isTradable) {
+    if (!instrument || !quote || !instrument.isTradable || !Number.isFinite(quote.currentPrice) || quote.currentPrice <= 0) {
       throw new RealTradeError(
         "REAL_INSTRUMENT_NOT_TRADABLE",
         "这只真实股票当前没有可交易的真实报价",
         404,
-      );
-    }
-    if (
-      now.getTime() - new Date(quote.receivedAt).getTime() >
-      this.#quoteMaximumAgeFor(quote)
-    ) {
-      throw new RealTradeError(
-        "REAL_QUOTE_STALE",
-        "真实行情已经过期，请等待东方财富同步恢复后再交易",
-        409,
       );
     }
     if (
@@ -983,6 +940,7 @@ export class RealTradingService {
         );
         const grossAmountUsd = roundMoney(priceUsd * order.quantity);
         const feeUsd = realTradeFee(grossAmountUsd);
+        assertRealTradeAmounts(priceUsd, grossAmountUsd, grossAmountUsd + feeUsd);
         let availableCashUsd = portfolio.available_cash_usd;
         let frozenCashUsd = portfolio.frozen_cash_usd;
         let position: RealPositionRecord | null;
@@ -1310,30 +1268,29 @@ export class RealTradingService {
       );
     const positions = positionResult.rows
       .map(mapPosition)
-      .map((record): Position | null => {
+      .map((record): Position => {
         const instrument = this.repository.getRecordedInstrumentById(
           record.instrumentId,
         );
         const quote = this.repository.getQuote(record.instrumentId);
-        if (!instrument || !quote) {
-          return null;
-        }
-        const currentPriceUsd = roundUnitPrice(
-          quotePriceToUsd(
-            quote.currentPrice,
-            quote.quoteCurrency,
-          ),
-        );
+        if (!instrument) throw new Error("REAL_POSITION_INSTRUMENT_NOT_FOUND");
+        const valued = quote !== undefined && Number.isFinite(quote.currentPrice) && quote.currentPrice > 0;
+        // Do not hide a holding or invent a market price from cost. Zero numeric
+        // placeholders are explicitly UNAVAILABLE and totals marked incomplete.
+        const currentPriceUsd = valued ? roundUnitPrice(
+          quotePriceToUsd(quote.currentPrice, quote.quoteCurrency),
+        ) : 0;
         const marketValueUsd = roundMoney(
           currentPriceUsd * record.quantity,
         );
         const costUsd = roundMoney(
           record.averageCostUsd * record.quantity,
         );
-        const profitLossUsd = roundMoney(
+        const profitLossUsd = valued ? roundMoney(
           marketValueUsd - costUsd,
-        );
+        ) : 0;
         return {
+          valuationStatus: valued ? "QUOTED" : "UNAVAILABLE",
           instrumentId: record.instrumentId,
           symbol: instrument.symbol,
           name: instrument.name,
@@ -1358,8 +1315,8 @@ export class RealTradingService {
               : roundPercent((profitLossUsd / costUsd) * 100),
         };
       })
-      .filter((position): position is Position => position !== null)
       .sort((left, right) => right.marketValueUsd - left.marketValueUsd);
+    const unvaluedPositionCount = positions.filter(p => p.valuationStatus === "UNAVAILABLE").length;
     const positionsValueUsd = roundMoney(
       positions.reduce(
         (sum, position) => sum + position.marketValueUsd,
@@ -1390,6 +1347,8 @@ export class RealTradingService {
     );
     return {
       mode: "REAL",
+      valuationComplete: unvaluedPositionCount === 0,
+      unvaluedPositionCount,
       displayCurrency,
       usdCnyRate: USD_CNY_DISPLAY_RATE,
       initialCashUsd: portfolio.initialCashUsd,
@@ -1404,6 +1363,12 @@ export class RealTradingService {
       ),
       positions,
     };
+  }
+}
+
+function assertRealTradeAmounts(...values: number[]): void {
+  if (values.some(value => !Number.isFinite(value) || value <= 0)) {
+    throw new RealTradeError("REAL_INSTRUMENT_NOT_TRADABLE", "报价无法转换为有效成交金额", 404);
   }
 }
 

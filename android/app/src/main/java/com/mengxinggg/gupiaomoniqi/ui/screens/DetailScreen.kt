@@ -200,7 +200,8 @@ private fun QuoteSummary(stock: StockUi, state: AppUiState) {
         "每手" to "${stock.lotSize}股",
     )
     val price = formatQuoteMoney(stock, stock.currentPrice, state.displayCurrency)
-    val updateTime = runCatching { java.time.Instant.parse(stock.updatedAt).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")) }.getOrDefault(stock.updatedAt)
+    val updateTime = quoteTimeLabel(stock.updatedAt)
+    val receiveTime = quoteTimeLabel(stock.receivedAt)
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp)) {
         val compact = maxWidth >= 310.dp && LocalDensity.current.fontScale <= 1.15f
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -222,6 +223,10 @@ private fun QuoteSummary(stock: StockUi, state: AppUiState) {
             } }
             Text((if (state.mode == UiMarketMode.REAL) "真实行情 · 模拟交易" else "虚拟市场 · 模拟交易") + " · ${state.displayCurrency.name} · ${stock.settlementCycle} · $updateTime",
                 fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (state.mode == UiMarketMode.REAL) Text(
+                "源更新 $updateTime · 服务器取回 $receiveTime · 可按最后有效价模拟交易",
+                fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (state.mode == UiMarketMode.REAL && stock.dataProvider in listOf("TENCENT", "SINA")) Text(
                 "报价补缺：${if (stock.dataProvider == "TENCENT") "腾讯" else "新浪"} · 时间为来源行情时间，可能延迟",
                 fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -229,6 +234,10 @@ private fun QuoteSummary(stock: StockUi, state: AppUiState) {
         }
     }
 }
+
+private fun quoteTimeLabel(value: String?): String = value?.takeIf { it.isNotBlank() }?.let {
+    runCatching { java.time.Instant.parse(it).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")) }.getOrDefault("未知")
+} ?: "未知"
 
 @Composable
 private fun QuoteStat(label: String, value: String, modifier: Modifier = Modifier) {

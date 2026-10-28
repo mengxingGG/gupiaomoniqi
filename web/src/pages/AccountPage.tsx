@@ -236,11 +236,14 @@ export function AccountPage({
         <div className="account-loading">正在计算最新资产…</div>
       ) : (
         <>
+          {portfolio.valuationComplete === false ? (
+            <div className="page-error">{portfolio.unvaluedPositionCount} 个持仓缺少有效报价，仍保留持仓数量；以下资产金额仅包含可估值部分，不是完整总资产。系统不会用成本价冒充市场价。</div>
+          ) : null}
           <section className="asset-grid">
             <AssetCard
               emphasis
-              label="总资产"
-              note="现金 + 持仓市值"
+              label={portfolio.valuationComplete === false ? "已估值资产（不完整）" : "总资产"}
+              note="现金 + 可估值持仓市值"
               value={formatMoney(portfolio.totalAssetsUsd, displayCurrency)}
             />
             <AssetCard
@@ -250,14 +253,14 @@ export function AccountPage({
             />
             <AssetCard
               label="持仓市值"
-              note={mode === "REAL" ? "按最新真实价计算" : "按最新模拟价计算"}
+              note={portfolio.valuationComplete === false ? "缺价持仓未计入" : mode === "REAL" ? "按最后有效真实价计算" : "按最新模拟价计算"}
               value={formatMoney(portfolio.positionsValueUsd, displayCurrency)}
             />
             <AssetCard
               movement={portfolio.totalProfitLossUsd}
               label="累计收益"
               note={`已实现 ${formatMoney(portfolio.realizedProfitUsd, displayCurrency)}`}
-              value={formatMoney(portfolio.totalProfitLossUsd, displayCurrency)}
+              value={portfolio.valuationComplete === false ? "暂不可完整计算" : formatMoney(portfolio.totalProfitLossUsd, displayCurrency)}
             />
           </section>
 
@@ -311,14 +314,14 @@ export function AccountPage({
                           ) : null}
                         </td>
                         <td>{formatMoney(position.averageCostUsd, displayCurrency)}</td>
-                        <td>{formatMoney(position.currentPriceUsd, displayCurrency)}</td>
-                        <td>{formatMoney(position.marketValueUsd, displayCurrency)}</td>
+                        <td>{position.valuationStatus === "UNAVAILABLE" ? "暂无报价" : formatMoney(position.currentPriceUsd, displayCurrency)}</td>
+                        <td>{position.valuationStatus === "UNAVAILABLE" ? "未估值" : formatMoney(position.marketValueUsd, displayCurrency)}</td>
                         <td className={signedClass(position.profitLossUsd)}>
-                          <strong>{formatMoney(position.profitLossUsd, displayCurrency)}</strong>
-                          <span>
+                          <strong>{position.valuationStatus === "UNAVAILABLE" ? "无法计算" : formatMoney(position.profitLossUsd, displayCurrency)}</strong>
+                          {position.valuationStatus !== "UNAVAILABLE" ? <span>
                             {position.profitLossPercent > 0 ? "+" : ""}
                             {position.profitLossPercent.toFixed(2)}%
-                          </span>
+                          </span> : null}
                         </td>
                       </tr>
                     ))}

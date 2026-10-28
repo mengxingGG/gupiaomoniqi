@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApplication } from "../src/application.js";
+import { REAL_MARKET_CONFIG } from "../src/config.js";
 import {
   EastmoneyProvider,
   type EastmoneyProviderOptions,
@@ -168,7 +169,7 @@ describe("real market database migrations", () => {
     const versions = await client.query<{ version: number }>(
       `SELECT version FROM schema_migrations ORDER BY version`,
     );
-    expect(versions.rows.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions.rows.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });
 
@@ -436,22 +437,25 @@ describe("真实行情完整模块", () => {
         rc: 0,
         data: {
           trends: [
-            "2026-07-29 09:30,101,0,0,0,0,0,0",
-            "2026-07-29 15:00,104,0,0,0,0,0,0",
+            // Complete valid OHLC fixtures: URL-window coverage must not rely on
+            // silently dropping placeholder zero-price minute rows.
+            "2026-07-29 09:30,101,101,102,100,1000,101000,101",
+            "2026-07-29 15:00,104,104,105,103,2000,208000,104",
           ],
         },
       });
     }) as unknown as typeof fetch;
     const provider = providerWith(fetchImplementation, {
-      clock: () => new Date("2026-07-29T12:00:00.000Z"),
+      clock: () => new Date("2026-07-29T21:00:00.000Z"),
     });
-    const instrument = providerPage("2026-07-29T12:00:00.000Z").items[0]!
+    const instrument = providerPage("2026-07-29T21:00:00.000Z").items[0]!
       .instrument;
 
     await provider.fetchHistory(instrument, "DAY");
     await provider.fetchHistory(instrument, "MONTH");
     await provider.fetchHistory(instrument, "YEAR");
-    await provider.fetchHistory(instrument, "INTRADAY");
+    const intraday = await provider.fetchHistory(instrument, "INTRADAY");
+    expect(intraday.map(candle => candle.close)).toEqual([101, 104]);
 
     const [dayUrl, monthUrl, yearUrl, intradayUrl] = requestedUrls;
     expect(dayUrl?.searchParams.get("beg")).toBe("20260130");
@@ -512,6 +516,26 @@ describe("真实行情完整模块", () => {
     expect(candles[1]?.averagePrice).toBeCloseTo(49.666, 8);
   });
 
+  it.each([
+    "2026-07-29 09:31,101,0,0,0,0,0,0",
+    "2026-07-29 09:31,101,104,103,100,1000,104000,104",
+  ])("分时区间包含无效 OHLC 时拒绝整组而不是静默丢行：%s", async invalidRow => {
+    const fetchImplementation = vi.fn(async () => Response.json({
+      rc: 0,
+      data: { trends: [
+        "2026-07-29 09:30,101,101,102,100,1000,101000,101",
+        invalidRow,
+      ] },
+    })) as unknown as typeof fetch;
+    const provider = providerWith(fetchImplementation, {
+      clock: () => new Date("2026-07-29T21:00:00.000Z"),
+    });
+    const instrument = providerPage("2026-07-29T21:00:00.000Z").items[0]!.instrument;
+    await expect(provider.fetchHistory(instrument, "INTRADAY")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
   it("真实盘口接口会映射东方财富五档买卖盘", async () => {
     const fetchImplementation = vi.fn(async (input: string | URL) => {
       const url = String(input);
@@ -539,17 +563,22 @@ describe("真实行情完整模块", () => {
             f38: 128,
             f39: 46.50,
             f40: 489,
-            f86: 1785333600,
+            f86: Date.parse("2026-07-29T11:59:00.000Z") / 1000,
           },
         });
       }
       return Response.json({ rc: 0, data: { total: 0, diff: [] } });
     }) as unknown as typeof fetch;
-    const provider = providerWith(fetchImplementation);
+    // The source update precedes retrieval; the helper's default clock is a
+    // day earlier and would correctly reject this fixture as future-dated.
+    const provider = providerWith(fetchImplementation, {
+      clock: () => new Date("2026-07-29T12:00:00.000Z"),
+    });
     const instrument = providerPage("2026-07-29T12:00:00.000Z").items[0]!
       .instrument;
 
     const orderBook = await provider.fetchOrderBook(instrument);
+    expect(orderBook.updatedAt).toBe("2026-07-29T11:59:00.000Z");
 
     expect(orderBook.asks).toHaveLength(5);
     expect(orderBook.bids).toHaveLength(5);
@@ -570,6 +599,24 @@ describe("真实行情完整模块", () => {
       quantity: 288,
     });
   });
+
+  it.each([undefined, "-", 0, Date.parse("2026-07-29T13:00:00.000Z") / 1000])(
+    "盘口缺少有效源时间或时间在未来时不能用取回时间冒充：%s",
+    async sourceTime => {
+      const fetchImplementation = vi.fn(async () => Response.json({
+        rc: 0,
+        data: { f11: 100, f12: 10, f31: 101, f32: 10, f86: sourceTime },
+      })) as unknown as typeof fetch;
+      const provider = providerWith(fetchImplementation, {
+        clock: () => new Date("2026-07-29T12:00:00.000Z"),
+      });
+      const instrument = providerPage("2026-07-29T12:00:00.000Z").items[0]!.instrument;
+      await expect(provider.fetchOrderBook(instrument)).rejects.toMatchObject({
+        code: "INVALID_RESPONSE",
+        message: "东方财富盘口缺少有效源时间",
+      });
+    },
+  );
 
   it("全量目录、最新报价和真实 K 线写入独立数据库并可重载", async () => {
     const { client, repository } = await createRealRepository();
@@ -863,6 +910,133 @@ describe("真实行情完整模块", () => {
     );
   });
 
+  it("东财目录页虽刚抓取但报价源时间过旧时会回退并写入更新的供应商报价", async () => {
+    const now = new Date("2026-10-27T14:00:00.000Z");
+    const { repository } = await createRealRepository();
+    const primaryPage = providerPage(now.toISOString());
+    const primaryQuote = primaryPage.items[0]!.quote!;
+    primaryQuote.updatedAt = new Date(now.getTime() - 10 * 60_000).toISOString();
+    primaryQuote.receivedAt = now.toISOString();
+    const fallbackQuote = {
+      ...primaryQuote,
+      currentPrice: 101,
+      highPrice: 101,
+      rawCurrentPrice: 101,
+      rawHighPrice: 101,
+      updatedAt: now.toISOString(),
+      receivedAt: now.toISOString(),
+      dataProvider: "TENCENT" as const,
+    };
+    const fakeProvider = {
+      fetchPage: vi.fn(async (market: "CN" | "HK" | "US" | "UK", page: number) =>
+        market === "US"
+          ? primaryPage
+          : {
+              market,
+              page,
+              pageSize: 100,
+              providerTotal: 0,
+              receivedAt: now.toISOString(),
+              durationMs: 1,
+              items: [],
+            }),
+    } as unknown as EastmoneyProvider;
+    const fetchQuotes = vi.fn(async () => [fallbackQuote]);
+    const supplemental = {
+      fetchQuotes,
+      fetchHistory: async () => [],
+      fetchOrderBook: async () => ({ asks: [], bids: [], updatedAt: now.toISOString() }),
+    };
+    const runtime = new RealMarketRuntime(
+      repository,
+      fakeProvider,
+      {
+        ...REAL_MARKET_CONFIG,
+        enabled: true,
+        pageSize: 100,
+        concurrency: 4,
+        fullSweepTargetMs: 5_000,
+        hotRefreshIntervalMs: 60_000,
+        hotPagesPerRound: 1,
+      },
+      async () => new Map(),
+      () => now,
+      undefined,
+      supplemental,
+    );
+
+    await runtime.initialize();
+    runtime.start();
+    try {
+      await waitUntil(() => runtime.getStatus().lastCompletedSweepAt !== null, 5_000);
+      expect(fetchQuotes).toHaveBeenCalledWith(
+        [expect.objectContaining({ id: "real-us-105-aapl" })],
+        expect.any(AbortSignal),
+      );
+      expect(repository.getQuote("real-us-105-aapl")).toMatchObject({
+        currentPrice: 101,
+        dataProvider: "TENCENT",
+        updatedAt: now.toISOString(),
+      });
+    } finally {
+      runtime.stop();
+      await runtime.waitForStop();
+    }
+  });
+
+  it("东财缺报价时即使上次缓存尚新也立即尝试备用源", async () => {
+    const now = new Date("2026-10-27T14:00:00.000Z");
+    const { repository } = await createRealRepository();
+    const prior = providerPage("2026-10-27T13:59:50.000Z");
+    await repository.upsertProviderPage(prior, "previous-good");
+    const primary = providerPage(now.toISOString());
+    primary.items[0]!.quote = null;
+    primary.items[0]!.instrument.isTradable = false;
+    const fallback = { ...prior.items[0]!.quote!, currentPrice: 101, rawCurrentPrice: 101,
+      highPrice: 101, rawHighPrice: 101, updatedAt: "2026-10-27T13:59:55.000Z",
+      receivedAt: now.toISOString(), dataProvider: "TENCENT" as const };
+    const provider = { fetchPage: vi.fn(async (market: "CN" | "HK" | "US" | "UK", page: number) =>
+      market === "US" ? primary : { market, page, pageSize: 100, providerTotal: 0,
+        receivedAt: now.toISOString(), durationMs: 0, items: [] }) } as unknown as EastmoneyProvider;
+    const fetchQuotes = vi.fn(async () => [fallback]);
+    const runtime = new RealMarketRuntime(repository, provider, {
+      ...REAL_MARKET_CONFIG, enabled: true, pageSize: 100, concurrency: 2,
+      fullSweepTargetMs: 5_000, hotRefreshIntervalMs: 60_000, hotPagesPerRound: 1,
+    }, async () => new Map(), () => now, undefined, {
+      fetchQuotes, fetchHistory: async () => [], fetchOrderBook: async () => ({ asks: [], bids: [], updatedAt: now.toISOString() }),
+    });
+    await runtime.initialize(); runtime.start();
+    try {
+      await waitUntil(() => runtime.getStatus().lastCompletedSweepAt !== null, 5_000);
+      expect(fetchQuotes).toHaveBeenCalledWith([expect.objectContaining({ id: "real-us-105-aapl" })], expect.any(AbortSignal));
+      expect(repository.getQuote("real-us-105-aapl")).toMatchObject({ currentPrice: 101, dataProvider: "TENCENT", updatedAt: "2026-10-27T13:59:55.000Z" });
+      expect(repository.getInstrumentById("real-us-105-aapl")?.isTradable).toBe(true);
+    } finally { runtime.stop(); await runtime.waitForStop(); }
+  });
+
+  it("休市时东财有效静止报价仍是首选，不因年龄切换来源", async () => {
+    const now = new Date("2026-10-31T21:00:00.000Z");
+    const { repository } = await createRealRepository();
+    const primary = providerPage(now.toISOString());
+    primary.items[0]!.quote!.updatedAt = "2026-10-28T20:00:00.000Z";
+    const provider = { fetchPage: vi.fn(async (market: "CN" | "HK" | "US" | "UK", page: number) =>
+      market === "US" ? primary : { market, page, pageSize: 100, providerTotal: 0,
+        receivedAt: now.toISOString(), durationMs: 0, items: [] }) } as unknown as EastmoneyProvider;
+    const fetchQuotes = vi.fn(async () => []);
+    const runtime = new RealMarketRuntime(repository, provider, {
+      ...REAL_MARKET_CONFIG, enabled: true, pageSize: 100, concurrency: 2,
+      fullSweepTargetMs: 5_000, hotRefreshIntervalMs: 60_000, hotPagesPerRound: 1,
+    }, async () => new Map(), () => now, undefined, {
+      fetchQuotes, fetchHistory: async () => [], fetchOrderBook: async () => ({ asks: [], bids: [], updatedAt: now.toISOString() }),
+    });
+    await runtime.initialize(); runtime.start();
+    try {
+      await waitUntil(() => runtime.getStatus().lastCompletedSweepAt !== null, 5_000);
+      expect(fetchQuotes).not.toHaveBeenCalled();
+      expect(repository.getQuote("real-us-105-aapl")).toMatchObject({ dataProvider: "EASTMONEY", updatedAt: "2026-10-28T20:00:00.000Z" });
+    } finally { runtime.stop(); await runtime.waitForStop(); }
+  });
+
   it("详情、持仓、自选页按优先级领先于普通页刷新", async () => {
     const fetchOrder: string[] = [];
     const fakeRepository = {
@@ -1032,6 +1206,55 @@ describe("真实行情完整模块", () => {
     expect(intraday?.candles.at(-1)?.averagePrice).toBeDefined();
   });
 
+  it("月线主备用切换时按整月替换，避免月首与月末重复", async () => {
+    const { repository } = await createRealRepository();
+    const page = providerPage("2026-10-28T08:00:00.000Z");
+    const id = page.items[0]!.instrument.id;
+    await repository.upsertProviderPage(page, "history-seed");
+    const candle = (time: string, source: "REAL_PROVIDER_HISTORY" | "REAL_TENCENT_HISTORY") => ({
+      instrumentId: id, interval: "MONTH" as const, time, open: 100, close: 101, high: 102,
+      low: 99, volume: 500, source, isPartial: false, updatedAt: "2026-10-28T08:00:00.000Z",
+    });
+    await repository.upsertCandles([
+      candle("2026-09-30T00:00:00.000Z", "REAL_PROVIDER_HISTORY"),
+      candle("2026-10-28T00:00:00.000Z", "REAL_PROVIDER_HISTORY"),
+    ]);
+    await repository.replaceHistoryWindow([
+      candle("2026-09-01T00:00:00.000Z", "REAL_TENCENT_HISTORY"),
+      candle("2026-10-01T00:00:00.000Z", "REAL_TENCENT_HISTORY"),
+    ]);
+    expect((await repository.listCandles(id, "MONTH", 10)).map(c => c.time)).toEqual([
+      "2026-09-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z",
+    ]);
+    await repository.replaceHistoryWindow([candle("2026-10-28T00:00:00.000Z", "REAL_PROVIDER_HISTORY")]);
+    const restored = await repository.listCandles(id, "MONTH", 10);
+    expect(restored.map(c => c.time)).toEqual(["2026-10-28T00:00:00.000Z"]);
+    expect(restored.at(-1)?.source).toBe("REAL_PROVIDER_HISTORY");
+  });
+
+  it("东财分时失败时使用备用 K 线并标明真实来源", async () => {
+    const { repository } = await createRealRepository();
+    const page = providerPage("2026-10-28T08:00:00.000Z");
+    await repository.upsertProviderPage(page, "history-seed");
+    const instrument = page.items[0]!.instrument;
+    const fetchHistory = vi.fn(async () => { throw new Error("主源暂不可用"); });
+    const fallbackHistory = vi.fn(async () => [{
+      instrumentId: instrument.id, interval: "MINUTE" as const, time: "2026-10-28T07:00:00.000Z",
+      open: 100, close: 101, high: 102, low: 99, volume: 500,
+      source: "REAL_TENCENT_HISTORY" as const, isPartial: false, updatedAt: "2026-10-28T08:00:00.000Z",
+    }]);
+    const runtime = new RealMarketRuntime(repository, { fetchHistory } as unknown as EastmoneyProvider,
+      { ...REAL_MARKET_CONFIG, enabled: false }, async () => new Map(), () => new Date("2026-10-28T08:00:00.000Z"), undefined,
+      { fetchQuotes: async () => [], fetchHistory: fallbackHistory, fetchOrderBook: async () => ({ asks: [], bids: [], updatedAt: "2026-10-28T08:00:00.000Z" }) });
+    const chart = await new RealMarketDetailService(repository, runtime).getChart(instrument.id, "INTRADAY");
+    expect(fetchHistory).toHaveBeenCalledOnce();
+    expect(fallbackHistory).toHaveBeenCalledOnce();
+    expect(chart?.candles).toHaveLength(1);
+    expect(chart?.candles[0]).toMatchObject({ source: "REAL_TENCENT_HISTORY", close: 101 });
+    expect(chart?.notice).toContain("腾讯分钟历史");
+    expect(chart?.notice).not.toContain("前复权");
+  });
+
   it("真实盘口接口失败时明确返回不可用提示而不是假盘口", async () => {
     const { repository } = await createRealRepository();
     const page = providerPage("2026-07-29T12:00:00.000Z");
@@ -1084,9 +1307,8 @@ describe("真实行情完整模块", () => {
   });
 
   it("同一身份拥有两个隔离账本，真实价交易、签到和礼包码均幂等", async () => {
-    // 用动态日期而非固定日期：固定日期会使 30 天 session 在真实时间
-    // 超过有效期后被 MemoryGameRepository.getSession 判为过期（时间炸弹）。
-    const now = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    // US 交易时段；所有服务共用同一模拟时钟。
+    const now = new Date("2026-10-27T14:00:00.000Z");
     const virtual = await createTestHarness({
       registerAccount: false,
       clock: () => now,
@@ -1245,8 +1467,8 @@ describe("真实行情完整模块", () => {
   });
 
   it("真实行情限价单冻结资金并在新报价穿价后成交", async () => {
-    // 动态日期：避免固定日期 session 过期导致的时间炸弹。
-    const now = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    // US 交易时段；所有服务共用同一模拟时钟。
+    const now = new Date("2026-10-27T14:00:00.000Z");
     const virtual = await createTestHarness({
       registerAccount: false,
       clock: () => now,
@@ -1349,8 +1571,138 @@ describe("真实行情完整模块", () => {
     }
   });
 
+  it("休市和报价长期未更新时仍可市价交易、挂单并撮合，同时保留报价时间", async () => {
+    const now = new Date("2026-10-27T14:00:00.000Z");
+    const virtual = await createTestHarness({
+      clock: () => now,
+    });
+    const { repository: realRepository } = await createRealRepository();
+    await realRepository.upsertProviderPage(
+      providerPage(now.toISOString()),
+      "session-seed",
+    );
+    const context = await createApplication({
+      repository: virtual.repository,
+      realRepository,
+      realSyncEnabled: false,
+      aiEnabled: false,
+      clock: () => now,
+    });
+    const accountId = virtual.accountId!;
+    try {
+      const pending = await context.realTradingService.placeOrder(
+        accountId,
+        "USD",
+        {
+          instrumentId: "real-us-105-aapl",
+          side: "BUY",
+          quantity: 10,
+          orderMode: "LIMIT",
+          limitPrice: 90,
+          idempotencyKey: "closed-market-limit-buy",
+        },
+      );
+      expect(pending.order.status).toBe("OPEN");
+
+      now.setTime(Date.parse("2026-10-31T21:00:00.000Z"));
+      const closedPage = providerPage("2026-10-28T21:00:00.000Z");
+      const quote = closedPage.items[0]!.quote!;
+      quote.currentPrice = 85;
+      quote.lowPrice = 85;
+      quote.updatedAt = "2026-10-28T21:00:00.000Z";
+      quote.receivedAt = "2026-10-28T21:00:00.000Z";
+      quote.changeAmount = -13;
+      quote.changePercent = -13.265306;
+      quote.rawCurrentPrice = 85;
+      quote.rawLowPrice = 85;
+      await realRepository.upsertProviderPage(closedPage, "closed-static-quote");
+
+      await expect(
+        context.realTradingService.matchOpenOrders(["real-us-105-aapl"]),
+      ).resolves.toBe(1);
+      const sold = await context.realTradingService.placeOrder(accountId, "USD", {
+        instrumentId: "real-us-105-aapl",
+        side: "SELL",
+        quantity: 1,
+        orderMode: "MARKET",
+        idempotencyKey: "closed-market-sell",
+      });
+      expect(sold.order.status).toBe("FILLED");
+      const limit = await context.realTradingService.placeOrder(accountId, "USD", {
+        instrumentId: "real-us-105-aapl",
+        side: "BUY",
+        quantity: 1,
+        orderMode: "LIMIT",
+        limitPrice: 80,
+        idempotencyKey: "closed-market-pending",
+      });
+      expect(limit.order.status).toBe("OPEN");
+      expect(realRepository.getQuote("real-us-105-aapl")).toMatchObject({
+        currentPrice: 85,
+        updatedAt: "2026-10-28T21:00:00.000Z",
+        receivedAt: "2026-10-28T21:00:00.000Z",
+      });
+      await expect(context.realTradingService.placeOrder(accountId, "USD", {
+        instrumentId: "real-us-105-aapl", side: "BUY", quantity: 0,
+        orderMode: "MARKET", idempotencyKey: "invalid-quantity",
+      })).rejects.toMatchObject({ code: "INVALID_LOT_SIZE" });
+    } finally {
+      await context.app.close();
+    }
+  });
+
+  it("主源暂时缺价保留已有报价的可交易性和来源，重载后仍可交易", async () => {
+    const now = new Date("2026-10-31T21:00:00.000Z");
+    const { client, repository } = await createRealRepository();
+    const page = providerPage("2026-10-27T14:00:00.000Z");
+    await repository.upsertProviderPage(page, "previous-good-sweep");
+    expect(repository.getQuote("real-us-105-aapl")?.dataProvider).toBe("EASTMONEY");
+    const missing = providerPage(now.toISOString());
+    missing.items[0]!.instrument.isTradable = false;
+    missing.items[0]!.quote = null;
+    await repository.upsertProviderPage(missing, "missing-quote-sweep");
+    expect(repository.getMarketItem("real-us-105-aapl")?.instrument.isTradable).toBe(true);
+    expect(repository.getQuote("real-us-105-aapl")?.updatedAt).toBe("2026-10-27T14:00:00.000Z");
+    await client.query("UPDATE real_instruments SET is_tradable = false WHERE id = $1", ["real-us-105-aapl"]);
+    const reloaded = await RealMarketRepository.create(client);
+    expect(reloaded.getMarketItem("real-us-105-aapl")?.instrument.isTradable).toBe(true);
+    expect(reloaded.getQuote("real-us-105-aapl")?.dataProvider).toBe("EASTMONEY");
+  });
+
+  it("全天可交易不改变 A 股 T+1 结算", async () => {
+    const now = new Date("2026-10-27T14:00:00.000Z");
+    const virtual = await createTestHarness({ clock: () => now });
+    const { repository } = await createRealRepository();
+    const page = providerPage("2026-10-26T07:00:00.000Z");
+    page.market = "CN";
+    const snapshot = page.items[0]!;
+    Object.assign(snapshot.instrument, {
+      id: "real-cn-1-600000", providerSecId: "1.600000", symbol: "600000",
+      market: "CN", sourceCurrency: "CNY", quoteCurrency: "CNY", exchangeCode: "1",
+      lotSize: 100, settlementCycle: "T1",
+    });
+    Object.assign(snapshot.quote!, {
+      instrumentId: "real-cn-1-600000", symbol: "600000", market: "CN", quoteCurrency: "CNY",
+    });
+    await repository.upsertProviderPage(page, "cn-seed");
+    const context = await createApplication({
+      repository: virtual.repository, realRepository: repository,
+      realSyncEnabled: false, aiEnabled: false, clock: () => now,
+    });
+    try {
+      await context.realTradingService.placeOrder(virtual.accountId!, "USD", {
+        instrumentId: "real-cn-1-600000", side: "BUY", quantity: 100, orderMode: "MARKET",
+      });
+      await expect(context.realTradingService.placeOrder(virtual.accountId!, "USD", {
+        instrumentId: "real-cn-1-600000", side: "SELL", quantity: 100, orderMode: "MARKET",
+      })).rejects.toMatchObject({ code: "INSUFFICIENT_POSITION" });
+    } finally {
+      await context.app.close();
+    }
+  });
+
   it("行情扫描停用旧标的后仍能读取历史委托和持仓、幂等重试与撤单，且不能新下单", async () => {
-    const now = new Date();
+    const now = new Date("2026-10-27T14:00:00.000Z");
     const virtual = await createTestHarness({ clock: () => now });
     const { client, repository: realRepository } = await createRealRepository();
     await realRepository.upsertProviderPage(providerPage(now.toISOString()), "old-sweep");
@@ -1695,8 +2047,8 @@ function snapshotWithChange(
       currentPrice,
       previousClose,
       openPrice: previousClose,
-      highPrice: currentPrice,
-      lowPrice: previousClose,
+      highPrice: Math.max(currentPrice, previousClose),
+      lowPrice: Math.min(currentPrice, previousClose),
       volume: 10_000,
       amount: currentPrice * 10_000,
       changeAmount: currentPrice - previousClose,
@@ -1706,8 +2058,8 @@ function snapshotWithChange(
       rawCurrentPrice: currentPrice,
       rawPreviousClose: previousClose,
       rawOpenPrice: previousClose,
-      rawHighPrice: currentPrice,
-      rawLowPrice: previousClose,
+      rawHighPrice: Math.max(currentPrice, previousClose),
+      rawLowPrice: Math.min(currentPrice, previousClose),
     },
   };
 }

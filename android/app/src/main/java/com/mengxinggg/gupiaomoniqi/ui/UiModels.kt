@@ -98,6 +98,7 @@ data class StockUi(
     val tradable: Boolean,
     val updatedAt: String,
     val dataProvider: String? = null,
+    val receivedAt: String? = null,
 )
 
 data class IndustryCountUi(
@@ -141,6 +142,7 @@ data class PositionUi(
     val marketValueUsd: Double,
     val profitLossUsd: Double,
     val profitLossPercent: Double,
+    val valuationStatus: String? = null,
 )
 
 data class PortfolioUi(
@@ -152,6 +154,8 @@ data class PortfolioUi(
     val unrealizedProfitUsd: Double,
     val totalProfitLossUsd: Double,
     val positions: List<PositionUi>,
+    val valuationComplete: Boolean = true,
+    val unvaluedPositionCount: Int = 0,
 )
 
 data class TransactionUi(

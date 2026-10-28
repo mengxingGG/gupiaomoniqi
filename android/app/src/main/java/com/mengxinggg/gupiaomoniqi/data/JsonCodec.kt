@@ -175,6 +175,7 @@ object JsonCodec {
         marketValueUsd = json.getDouble("marketValueUsd"),
         profitLossUsd = json.getDouble("profitLossUsd"),
         profitLossPercent = json.getDouble("profitLossPercent"),
+        valuationStatus = json.nullableString("valuationStatus"),
     )
 
     fun portfolio(json: JSONObject): Portfolio = Portfolio(
@@ -190,6 +191,8 @@ object JsonCodec {
         unrealizedProfitUsd = json.getDouble("unrealizedProfitUsd"),
         totalProfitLossUsd = json.getDouble("totalProfitLossUsd"),
         positions = json.getJSONArray("positions").mapObjects(::position),
+        valuationComplete = json.optBoolean("valuationComplete", true),
+        unvaluedPositionCount = json.optInt("unvaluedPositionCount", 0),
     )
 
     fun transaction(json: JSONObject): Transaction = Transaction(
@@ -272,6 +275,7 @@ object JsonCodec {
         averagePrice = json.nullableDouble("averagePrice"),
         source = json.enum("source"),
         isPartial = json.getBoolean("isPartial"),
+        dataProvider = json.nullableString("dataProvider"),
     )
 
     fun chartSeries(json: JSONObject): ChartSeries = ChartSeries(

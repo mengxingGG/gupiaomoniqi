@@ -2542,6 +2542,7 @@ private fun MarketItem.toUi(): StockUi = StockUi(
     tradable = instrument.isTradable,
     updatedAt = quote.updatedAt,
     dataProvider = quote.dataProvider,
+    receivedAt = quote.receivedAt,
 )
 
 internal fun Candle.toUi(): CandleUi = CandleUi(
@@ -2580,6 +2581,7 @@ private fun Position.toUi(): PositionUi = PositionUi(
     marketValueUsd = marketValueUsd,
     profitLossUsd = profitLossUsd,
     profitLossPercent = profitLossPercent,
+    valuationStatus = valuationStatus,
 )
 
 private fun Portfolio.toUi(): PortfolioUi = PortfolioUi(
@@ -2591,6 +2593,8 @@ private fun Portfolio.toUi(): PortfolioUi = PortfolioUi(
     unrealizedProfitUsd = unrealizedProfitUsd,
     totalProfitLossUsd = totalProfitLossUsd,
     positions = positions.map(Position::toUi),
+    valuationComplete = valuationComplete,
+    unvaluedPositionCount = unvaluedPositionCount,
 )
 
 private fun Transaction.toUi(): TransactionUi = TransactionUi(

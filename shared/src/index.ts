@@ -112,11 +112,13 @@ export interface Quote {
   volume: number;
   changeAmount: number;
   changePercent: number;
+  /** Source update time. Empty means unknown; receivedAt is never a substitute. */
   updatedAt: string;
   receivedAt?: string;
 }
 
 export interface Position {
+  valuationStatus?: "QUOTED" | "UNAVAILABLE";
   instrumentId: string;
   symbol: string;
   name: string;
@@ -134,6 +136,9 @@ export interface Position {
 }
 
 export interface PortfolioSnapshot {
+  /** False means numeric asset totals exclude unvalued holdings and are not complete NAV. */
+  valuationComplete?: boolean;
+  unvaluedPositionCount?: number;
   mode: MarketMode;
   displayCurrency: DisplayCurrency;
   usdCnyRate: number;
@@ -280,6 +285,7 @@ export interface IndustrySummary {
 }
 
 export interface Candle {
+  dataProvider?: "EASTMONEY" | "TENCENT" | "SINA";
   time: string;
   open: number;
   high: number;

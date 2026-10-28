@@ -319,7 +319,7 @@ export function StockPage({
             </div>
             <p>
               {marketLabel(item.instrument.market)} · {item.instrument.symbol} ·{" "}
-              {item.instrument.industry} · 更新 {new Date(item.quote.updatedAt).toLocaleString("zh-CN")} · 显示 {displayCurrency}
+              {item.instrument.industry} · 源更新 {formatQuoteTime(item.quote.updatedAt)} · 显示 {displayCurrency}
             </p>
           </div>
         </div>
@@ -565,10 +565,10 @@ export function StockPage({
                 <div>
                   <dt>行情时间</dt>
                   <dd>
-                    {new Date(
-                      item.quote.updatedAt,
-                    ).toLocaleString("zh-CN", { hour12: false })}
+                    {formatQuoteTime(item.quote.updatedAt)}
                   </dd>
+                  <dt>服务器取回</dt>
+                  <dd>{formatQuoteTime(item.quote.receivedAt)}</dd>
                   <dt>报价来源</dt>
                   <dd>{item.quote.dataProvider === "TENCENT" ? "腾讯 · 单股补缺（可能延迟）" : item.quote.dataProvider === "SINA" ? "新浪 · 单股补缺" : "东方财富"}</dd>
                 </div>
@@ -579,6 +579,11 @@ export function StockPage({
       </div>
     </main>
   );
+}
+
+function formatQuoteTime(value?: string): string {
+  return value && Number.isFinite(Date.parse(value))
+    ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "未知";
 }
 
 function QuoteStat({ label, value }: { label: string; value: string }) {

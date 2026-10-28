@@ -48,6 +48,7 @@ data class Position(
     val marketValueUsd: Double,
     val profitLossUsd: Double,
     val profitLossPercent: Double,
+    val valuationStatus: String? = null,
 )
 
 data class Portfolio(
@@ -63,6 +64,8 @@ data class Portfolio(
     val unrealizedProfitUsd: Double,
     val totalProfitLossUsd: Double,
     val positions: List<Position>,
+    val valuationComplete: Boolean = true,
+    val unvaluedPositionCount: Int = 0,
 )
 
 typealias PortfolioSnapshot = Portfolio

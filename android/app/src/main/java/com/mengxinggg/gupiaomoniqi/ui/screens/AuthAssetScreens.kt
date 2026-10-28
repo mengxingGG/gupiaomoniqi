@@ -435,10 +435,13 @@ fun AssetsScreen(
             return@LazyColumn
         }
 
+        if (!portfolio.valuationComplete) item {
+            Text("${portfolio.unvaluedPositionCount} 个持仓缺少有效报价，数量仍保留；以下金额仅为已估值部分，不是完整资产。", color = MaterialTheme.colorScheme.error)
+        }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssetMetric(
-                    label = "总资产",
+                    label = if (portfolio.valuationComplete) "总资产" else "已估值资产（不完整）",
                     value = formatMoney(portfolio.totalAssetsUsd, state.displayCurrency),
                     note = "现金 + 持仓",
                     modifier = Modifier.weight(1f),
@@ -474,12 +477,12 @@ fun AssetsScreen(
                 AssetMetric(
                     label = "持仓市值",
                     value = formatMoney(portfolio.positionsValueUsd, state.displayCurrency),
-                    note = if (state.mode == UiMarketMode.REAL) "按最新真实价" else "按最新模拟价",
+                    note = if (!portfolio.valuationComplete) "缺价持仓未计入" else if (state.mode == UiMarketMode.REAL) "按最后有效真实价" else "按最新模拟价",
                     modifier = Modifier.weight(1f),
                 )
                 AssetMetric(
                     label = "累计收益",
-                    value = formatMoney(portfolio.totalProfitLossUsd, state.displayCurrency, signed = true),
+                    value = if (portfolio.valuationComplete) formatMoney(portfolio.totalProfitLossUsd, state.displayCurrency, signed = true) else "暂不可完整计算",
                     note = "已实现 ${formatMoney(portfolio.realizedProfitUsd, state.displayCurrency)}",
                     modifier = Modifier.weight(1f),
                     movement = portfolio.totalProfitLossUsd,
@@ -748,7 +751,7 @@ private fun PositionCard(
                     )
                 }
                 Text(
-                    formatMoney(position.marketValueUsd, state.displayCurrency),
+                    if (position.valuationStatus == "UNAVAILABLE") "未估值" else formatMoney(position.marketValueUsd, state.displayCurrency),
                     fontWeight = FontWeight.Bold,
                 )
             }
@@ -765,7 +768,7 @@ private fun PositionCard(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    "${formatMoney(position.profitLossUsd, state.displayCurrency, signed = true)} " +
+                    if (position.valuationStatus == "UNAVAILABLE") "缺少报价，盈亏未知" else "${formatMoney(position.profitLossUsd, state.displayCurrency, signed = true)} " +
                         formatPercent(position.profitLossPercent),
                     color = if (position.profitLossUsd >= 0) GainRed else LossGreen,
                     fontWeight = FontWeight.Bold,

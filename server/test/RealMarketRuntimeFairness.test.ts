@@ -314,6 +314,10 @@ function fakeRepository(
     startSweep: async () => options.startSweep?.(),
     upsertProviderPage: async () =>
       options.upsertProviderPage?.(),
+    upsertProviderPageResolved: async (page: ProviderPage) => {
+      await options.upsertProviderPage?.();
+      return page;
+    },
     completeSweep: async () => options.completeSweep?.(),
     recordPageFailure: async () => undefined,
     getSourcePage: (instrumentId: string) =>

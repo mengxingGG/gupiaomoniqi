@@ -189,13 +189,13 @@ export class EastmoneyProvider {
     signal?: AbortSignal,
   ): Promise<ProviderPage> {
     const config = MARKET_CONFIG[market];
-    const receivedAt = this.#clock();
     const startedAt = performance.now();
     const payload = await this.#requestJson(
       buildListUrl(config, page, this.options.pageSize),
       config.referer,
       signal,
     );
+    const receivedAt = this.#clock();
     const data = asObject(payload.data);
 
     if (!data) {
@@ -278,6 +278,7 @@ export class EastmoneyProvider {
       );
     }
     const updatedAt = timestampValue(data.f86, this.#clock());
+    if (!updatedAt) throw new EastmoneyProviderError("东方财富盘口缺少有效源时间", "INVALID_RESPONSE");
     const asks = normalizeOrderBookSide(
       instrument,
       data,
@@ -393,11 +394,15 @@ export class EastmoneyProvider {
     }
 
     const now = this.#clock().toISOString();
-    return rows
+    const candles = rows
       .map((value) =>
         normalizeTrendRow(String(value), instrument, now),
       )
       .filter((candle): candle is ProviderCandle => candle !== null);
+    if (candles.length !== rows.length) throw new EastmoneyProviderError(
+      `${instrument.symbol} 分时记录存在无效字段，需要按股票补取完整区间`, "INVALID_RESPONSE",
+    );
+    return candles;
   }
 
   async #requestJson(
@@ -682,6 +687,7 @@ function normalizeListRow(
     rawOpenPrice: open > 0 ? open : current,
     rawHighPrice: high > 0 ? high : Math.max(current, open),
     rawLowPrice: low > 0 ? low : Math.min(current, open || current),
+    dataProvider: "EASTMONEY",
   };
   return { instrument, quote };
 }
@@ -718,7 +724,7 @@ function normalizeKlineRow(
 
   if (
     !date ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) || !validCalendarDate(date) ||
     open <= 0 ||
     close <= 0 ||
     high <= 0 ||
@@ -760,10 +766,12 @@ function normalizeTrendRow(
   if (
     !localTime ||
     !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(localTime) ||
+    !validCalendarDate(localTime.slice(0, 10)) ||
+    Number(localTime.slice(11, 13)) > 23 || Number(localTime.slice(14, 16)) > 59 ||
     open <= 0 ||
     close <= 0 ||
     high <= 0 ||
-    low <= 0
+    low <= 0 || high < Math.max(open, close) || low > Math.min(open, close)
   ) {
     return null;
   }
@@ -788,6 +796,11 @@ function normalizeTrendRow(
     isPartial: false,
     updatedAt,
   };
+}
+
+function validCalendarDate(date: string): boolean {
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
 }
 
 function normalizePeriodTime(
@@ -888,12 +901,15 @@ function priceValue(value: unknown): number {
   return number > 0 ? number : 0;
 }
 
-function timestampValue(value: unknown, fallback: Date): string {
+function timestampValue(value: unknown, now: Date): string {
   const seconds = numericValue(value);
-  if (seconds > 1_000_000_000) {
-    return new Date(seconds * 1_000).toISOString();
+  const milliseconds = seconds * 1_000;
+  if (seconds > 1_000_000_000 && Number.isFinite(milliseconds) &&
+      milliseconds <= now.getTime() + 120_000) {
+    return new Date(milliseconds).toISOString();
   }
-  return fallback.toISOString();
+  // Keep valid prices, but never invent their source time.
+  return "";
 }
 
 function zonedLocalTimeToIso(

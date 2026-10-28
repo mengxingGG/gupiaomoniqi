@@ -33,7 +33,7 @@ interface InstrumentQuoteRow {
   is_active: boolean;
   source_page: number;
   source_rank: number;
-  source_updated_at: Date | string;
+  source_updated_at: Date | string | null;
   current_price: number | null;
   previous_close: number | null;
   open_price: number | null;
@@ -91,6 +91,8 @@ export class RealMarketRepository {
   readonly #instruments = new Map<string, RealInstrumentRecord>();
   readonly #quotes = new Map<string, RealQuoteRecord>();
   readonly #pageStates = new Map<string, ProviderPageState>();
+  readonly #providerIds = new Map<string, string>();
+  #identityWriteQueue: Promise<void> = Promise.resolve();
 
   private constructor(readonly client: PGlite) {}
 
@@ -353,7 +355,54 @@ export class RealMarketRepository {
     hotInstrumentIds: ReadonlySet<string> = new Set(),
     supplemental = false,
   ): Promise<void> {
-    const items = uniqueProviderPageItems(providerPage.items);
+    await this.upsertProviderPageResolved(providerPage, sweepId, hotInstrumentIds, supplemental);
+  }
+
+  /** Resolve identities and persist as one serialized operation; callers must emit this page. */
+  async upsertProviderPageResolved(
+    providerPage: ProviderPage,
+    sweepId: string | null,
+    hotInstrumentIds: ReadonlySet<string> = new Set(),
+    supplemental = false,
+  ): Promise<ProviderPage> {
+    const operation = this.#identityWriteQueue.then(() =>
+      this.#writeProviderPage(providerPage, sweepId, hotInstrumentIds, supplemental),
+    );
+    this.#identityWriteQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async #writeProviderPage(
+    providerPage: ProviderPage,
+    sweepId: string | null,
+    hotInstrumentIds: ReadonlySet<string>,
+    supplemental: boolean,
+  ): Promise<ProviderPage> {
+    const resolved = this.#resolvePageIdentities(providerPage.items, supplemental);
+    const items = uniqueProviderPageItems(resolved).map((item) => {
+      const retained = this.#quotes.get(item.instrument.id);
+      // 当前东财 isTradable 由本页报价完整性推导；本页缺价时不应丢弃已有有效报价的交易能力。
+      const hasRetainedQuote = retained !== undefined &&
+        Number.isFinite(retained.currentPrice) && retained.currentPrice > 0;
+      const incoming = item.quote;
+      if (incoming && (incoming.symbol !== item.instrument.symbol || incoming.market !== item.instrument.market ||
+          incoming.quoteCurrency !== item.instrument.quoteCurrency)) {
+        throw new Error(`Quote metadata identity mismatch: ${item.instrument.providerSecId}`);
+      }
+      if (incoming && !validQuoteSnapshot(incoming)) throw new Error("Invalid real quote snapshot");
+      // Rejected/older quotes must not be emitted or turned into candle snapshots.
+      const accepted = incoming && (!retained ||
+        !retained.updatedAt && (incoming.updatedAt !== "" || incoming.receivedAt >= retained.receivedAt) ||
+        incoming.updatedAt !== "" && incoming.updatedAt >= retained.updatedAt) ? incoming : null;
+      return {
+        instrument: !item.instrument.isTradable && hasRetainedQuote
+          ? { ...item.instrument, isTradable: true }
+          : item.instrument,
+        quote: accepted && !accepted.dataProvider && !supplemental
+          ? { ...accepted, dataProvider: "EASTMONEY" as const }
+          : accepted,
+      };
+    });
     for (const item of items) {
       const existing = this.#instruments.get(item.instrument.id);
       if (
@@ -383,7 +432,7 @@ export class RealMarketRepository {
       source_page: instrument.sourcePage,
       source_rank: instrument.sourceRank,
       last_seen_sweep_id: sweepId,
-      source_updated_at: instrument.sourceUpdatedAt,
+      source_updated_at: instrument.sourceUpdatedAt || null,
       updated_at: providerPage.receivedAt,
     }));
     const quotes = items
@@ -406,7 +455,7 @@ export class RealMarketRepository {
         raw_open_price: quote.rawOpenPrice,
         raw_high_price: quote.rawHighPrice,
         raw_low_price: quote.rawLowPrice,
-        source_updated_at: quote.updatedAt,
+        source_updated_at: quote.updatedAt || null,
         received_at: quote.receivedAt,
       }));
     const dailyCandles = items
@@ -430,7 +479,7 @@ export class RealMarketRepository {
         supplemental ? [] : instruments,
         PROVIDER_PAGE_WRITE_BATCH_SIZE,
       )) {
-        await transaction.query(
+        const written = await transaction.query(
           `INSERT INTO real_instruments (
              id, provider_sec_id, symbol, name, market,
              source_currency, quote_currency, exchange_code, industry,
@@ -453,7 +502,6 @@ export class RealMarketRepository {
                updated_at timestamptz
              )
            ON CONFLICT (id) DO UPDATE SET
-             provider_sec_id = excluded.provider_sec_id,
              symbol = excluded.symbol,
              name = excluded.name,
              market = excluded.market,
@@ -472,9 +520,14 @@ export class RealMarketRepository {
                real_instruments.last_seen_sweep_id
              ),
              source_updated_at = excluded.source_updated_at,
-             updated_at = excluded.updated_at`,
+             updated_at = excluded.updated_at
+           WHERE real_instruments.provider_sec_id = excluded.provider_sec_id
+           RETURNING id`,
           [JSON.stringify(batch)],
         );
+        if (written.rows.length !== batch.length) {
+          throw new Error("Real market instrument identity changed concurrently");
+        }
         await yieldToEventLoop();
       }
 
@@ -524,8 +577,9 @@ export class RealMarketRepository {
              source_updated_at = excluded.source_updated_at,
              received_at = excluded.received_at,
              data_provider = excluded.data_provider
-           WHERE excluded.source_updated_at >=
-                 real_quotes.source_updated_at`,
+           WHERE (real_quotes.source_updated_at IS NULL AND
+                  (excluded.source_updated_at IS NOT NULL OR excluded.received_at >= real_quotes.received_at))
+              OR excluded.source_updated_at >= real_quotes.source_updated_at`,
           [JSON.stringify(batch)],
         );
         await yieldToEventLoop();
@@ -581,10 +635,10 @@ export class RealMarketRepository {
     });
 
     for (const { instrument, quote } of items) {
-      if (!supplemental) this.#instruments.set(
-        instrument.id,
-        structuredClone(instrument),
-      );
+      if (!supplemental) {
+        this.#instruments.set(instrument.id, structuredClone(instrument));
+        this.#providerIds.set(instrument.providerSecId, instrument.id);
+      }
       if (supplemental && quote) {
         const stored = this.#instruments.get(instrument.id);
         if (stored) this.#instruments.set(instrument.id, { ...stored, isTradable: true });
@@ -593,8 +647,8 @@ export class RealMarketRepository {
       if (quote) {
         const current = this.#quotes.get(quote.instrumentId);
         if (
-          !current ||
-          quote.updatedAt >= current.updatedAt
+          !current || !current.updatedAt && (quote.updatedAt !== "" || quote.receivedAt >= current.receivedAt) ||
+          quote.updatedAt !== "" && quote.updatedAt >= current.updatedAt
         ) {
           this.#quotes.set(
             quote.instrumentId,
@@ -605,7 +659,7 @@ export class RealMarketRepository {
     }
 
     // 补报价不改变东方财富的页码、清单完整性或分片成功状态。
-    if (supplemental) return;
+    if (supplemental) return { ...providerPage, items };
     const state: ProviderPageState = {
       market: providerPage.market,
       page: providerPage.page,
@@ -627,6 +681,59 @@ export class RealMarketRepository {
       ),
       state,
     );
+    return { ...providerPage, items };
+  }
+
+  #resolvePageIdentities(items: ProviderInstrumentSnapshot[], supplemental: boolean): ProviderInstrumentSnapshot[] {
+    // Reserve every persisted identity, including inactive rows. Staged identities are
+    // local to this write and only become visible in memory after commit.
+    const occupied = new Map<string, string>();
+    const assigned = new Map<string, string>();
+    const ownerOf = (id: string) => occupied.get(id) ?? this.#instruments.get(id)?.providerSecId;
+    const byProvider = new Map<string, ProviderInstrumentSnapshot>();
+    for (const item of items) {
+      const previous = byProvider.get(item.instrument.providerSecId);
+      if (!previous || item.instrument.sourceRank < previous.instrument.sourceRank) {
+        byProvider.set(item.instrument.providerSecId, item);
+      }
+    }
+    // Stable ordering avoids dependence on the provider's row order within a page.
+    const ordered = [...byProvider.values()].sort((a, b) =>
+      a.instrument.providerSecId < b.instrument.providerSecId ? -1 :
+      a.instrument.providerSecId > b.instrument.providerSecId ? 1 : 0);
+    const result: ProviderInstrumentSnapshot[] = [];
+    for (const item of ordered) {
+      const instrument = item.instrument;
+      const provider = instrument.providerSecId;
+      let id = this.#providerIds.get(provider) ?? assigned.get(provider);
+      if (id) {
+        const stored = this.#instruments.get(id)!;
+        if (stored.market !== instrument.market) throw new Error(`Provider identity market mismatch: ${provider}`);
+      } else {
+        if (supplemental) throw new Error(`Unknown supplemental provider identity: ${provider}`);
+        id = instrument.id;
+        const owner = ownerOf(id);
+        if (owner && owner !== provider) {
+          // A page may only claim a colliding legacy ID when it actually is the
+          // provider's normal Eastmoney ID, not an inconsistent forged snapshot.
+          const normal = `real-${instrument.market.toLowerCase()}-${provider.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+          if (id !== normal) throw instrumentIdentityCollision(id, owner, provider);
+          const suffix = Buffer.from(provider, "utf16le").toString("hex");
+          const base = `${id}--secid-${suffix}`;
+          id = base;
+          let attempt = 0;
+          while (ownerOf(id)) id = `${base}-${++attempt}`;
+        }
+        assigned.set(provider, id);
+        occupied.set(id, provider);
+      }
+      if (supplemental && instrument.id !== id) throw instrumentIdentityCollision(instrument.id, provider, provider);
+      if (item.quote && item.quote.instrumentId !== instrument.id) {
+        throw new Error(`Quote identity mismatch: ${provider}`);
+      }
+      result.push({ instrument: { ...instrument, id }, quote: item.quote ? { ...item.quote, instrumentId: id } : null });
+    }
+    return result;
   }
 
   async upsertCandles(candles: ProviderCandle[]): Promise<void> {
@@ -649,10 +756,19 @@ export class RealMarketRepository {
     const first = candles[0]!;
     if (candles.some(c => c.instrumentId !== first.instrumentId || c.interval !== first.interval || c.source !== first.source)) throw new Error("历史区间不能混用标的或来源");
     const sorted = [...candles].sort((a, b) => a.time.localeCompare(b.time));
+    if (sorted.some(c => !Number.isFinite(Date.parse(c.time)) || !Number.isFinite(Date.parse(c.updatedAt)) ||
+        ![c.open, c.close, c.high, c.low].every(p => Number.isFinite(p) && p > 0) ||
+        c.high < Math.max(c.open, c.close) || c.low > Math.min(c.open, c.close) ||
+        !Number.isFinite(c.volume) || c.volume < 0)) throw new Error("历史区间包含无效价格、时间或成交量");
+    const period = first.interval === "MONTH" || first.interval === "YEAR";
+    const key = (c: ProviderCandle) => period ? c.time.slice(0, first.interval === "YEAR" ? 4 : 7) : c.time;
+    const unique = [...new Map(sorted.map(c => [key(c), c])).values()];
     await this.client.transaction(async transaction => {
-      await transaction.query("DELETE FROM real_candles WHERE instrument_id = $1 AND interval = $2 AND bucket_start >= $3 AND bucket_start <= $4",
-        [first.instrumentId, first.interval, sorted[0]!.time, sorted.at(-1)!.time]);
-      await upsertCandleRows(transaction, sorted, false, CANDLE_WRITE_BATCH_SIZE);
+      // A qfq basis can change even without a provider switch. Keep only this
+      // complete response, not a tail imported under a different adjustment basis.
+      await transaction.query("DELETE FROM real_candles WHERE instrument_id = $1 AND interval = $2 AND source IN ('REAL_PROVIDER_HISTORY', 'REAL_TENCENT_HISTORY')",
+        [first.instrumentId, first.interval]);
+      await upsertCandleRows(transaction, unique, false, CANDLE_WRITE_BATCH_SIZE);
     });
   }
 
@@ -672,18 +788,27 @@ export class RealMarketRepository {
       volume: number;
       average_price: number | null;
       source: ProviderCandle["source"];
+      data_provider: ProviderCandle["dataProvider"] | null;
       is_partial: boolean;
       updated_at: Date | string;
     }>(
       `SELECT instrument_id, interval, bucket_start,
               open::float8, high::float8, low::float8, close::float8,
-              volume::float8, average_price::float8, source, is_partial,
+              volume::float8, average_price::float8, source, data_provider, is_partial,
               updated_at
          FROM (
            SELECT *
              FROM real_candles
             WHERE instrument_id = $1
               AND interval = $2
+              -- Legacy snapshots have neither verifiable provider provenance nor
+              -- a guarantee that their bucket used an actual source timestamp.
+              AND (source <> 'REAL_PROVIDER_SNAPSHOT' OR data_provider IS NOT NULL)
+              AND source = COALESCE(
+                (SELECT source FROM real_candles
+                  WHERE instrument_id = $1 AND interval = $2
+                    AND source IN ('REAL_PROVIDER_HISTORY', 'REAL_TENCENT_HISTORY')
+                  ORDER BY updated_at DESC, bucket_start DESC, source LIMIT 1), source)
             ORDER BY bucket_start DESC
             LIMIT $3
          ) selected
@@ -701,6 +826,7 @@ export class RealMarketRepository {
       volume: row.volume,
       averagePrice: row.average_price ?? undefined,
       source: row.source,
+      dataProvider: row.data_provider ?? undefined,
       isPartial: row.is_partial,
       updatedAt: toIso(row.updated_at),
     }));
@@ -781,40 +907,46 @@ export class RealMarketRepository {
         exchangeCode: row.exchange_code,
         sourcePage: row.source_page,
         sourceRank: row.source_rank,
-        sourceUpdatedAt: toIso(row.source_updated_at),
+        sourceUpdatedAt: row.source_updated_at ? toIso(row.source_updated_at) : "",
         isActive: row.is_active,
       };
       this.#instruments.set(instrument.id, instrument);
+      this.#providerIds.set(instrument.providerSecId, instrument.id);
 
       if (
         row.current_price !== null &&
-        row.quote_source_updated_at &&
+        Number.isFinite(row.current_price) && row.current_price > 0 &&
         row.received_at
       ) {
-        this.#quotes.set(row.id, {
+        const quote: RealQuoteRecord = {
           instrumentId: row.id,
           symbol: row.symbol,
           market: row.market,
           quoteCurrency: row.quote_currency,
           currentPrice: row.current_price,
-          previousClose: row.previous_close ?? row.current_price,
-          openPrice: row.open_price ?? row.current_price,
-          highPrice: row.high_price ?? row.current_price,
-          lowPrice: row.low_price ?? row.current_price,
-          volume: row.volume ?? 0,
-          amount: row.amount ?? 0,
-          changeAmount: row.change_amount ?? 0,
-          changePercent: row.change_percent ?? 0,
-          rawCurrentPrice: row.raw_current_price ?? row.current_price,
-          rawPreviousClose:
-            row.raw_previous_close ?? row.current_price,
-          rawOpenPrice: row.raw_open_price ?? row.current_price,
-          rawHighPrice: row.raw_high_price ?? row.current_price,
-          rawLowPrice: row.raw_low_price ?? row.current_price,
-          updatedAt: toIso(row.quote_source_updated_at),
+          previousClose: row.previous_close!,
+          openPrice: row.open_price!,
+          highPrice: row.high_price!,
+          lowPrice: row.low_price!,
+          volume: row.volume!,
+          amount: row.amount!,
+          changeAmount: row.change_amount!,
+          changePercent: row.change_percent!,
+          rawCurrentPrice: row.raw_current_price!,
+          rawPreviousClose: row.raw_previous_close!,
+          rawOpenPrice: row.raw_open_price!,
+          rawHighPrice: row.raw_high_price!,
+          rawLowPrice: row.raw_low_price!,
+          updatedAt: row.quote_source_updated_at ? toIso(row.quote_source_updated_at) : "",
           receivedAt: toIso(row.received_at),
           dataProvider: row.data_provider,
-        });
+        };
+        // Restore trading capability only for a complete, valid retained snapshot;
+        // missing database fields are never synthesized from current price.
+        if (validQuoteSnapshot(quote)) {
+          instrument.isTradable = true;
+          this.#quotes.set(row.id, quote);
+        }
       }
     }
 
@@ -936,7 +1068,8 @@ function compareByNumber(
 function dailySnapshot(
   instrument: RealInstrumentRecord,
   quote: RealQuoteRecord,
-): ProviderCandle {
+): ProviderCandle | null {
+  if (!quote.updatedAt || !Number.isFinite(Date.parse(quote.updatedAt))) return null;
   return {
     instrumentId: instrument.id,
     interval: "DAY",
@@ -947,6 +1080,7 @@ function dailySnapshot(
     close: quote.currentPrice,
     volume: quote.volume,
     source: "REAL_PROVIDER_SNAPSHOT",
+    dataProvider: quote.dataProvider ?? "EASTMONEY",
     isPartial: true,
     updatedAt: quote.receivedAt,
   };
@@ -955,12 +1089,13 @@ function dailySnapshot(
 function hotMinuteSnapshot(
   quote: RealQuoteRecord,
   previous: RealQuoteRecord | undefined,
-): ProviderCandle {
+): ProviderCandle | null {
+  if (!quote.updatedAt || !Number.isFinite(Date.parse(quote.updatedAt))) return null;
   const bucket = new Date(
     Math.floor(new Date(quote.updatedAt).getTime() / 60_000) * 60_000,
   ).toISOString();
   const open =
-    previous &&
+    previous && previous.dataProvider === quote.dataProvider && previous.updatedAt &&
     Math.floor(new Date(previous.updatedAt).getTime() / 60_000) ===
       Math.floor(new Date(quote.updatedAt).getTime() / 60_000)
       ? previous.currentPrice
@@ -973,11 +1108,26 @@ function hotMinuteSnapshot(
     high: Math.max(open, quote.currentPrice),
     low: Math.min(open, quote.currentPrice),
     close: quote.currentPrice,
-    volume: Math.max(0, quote.volume - (previous?.volume ?? quote.volume)),
+    volume: previous && previous.dataProvider === quote.dataProvider && previous.updatedAt &&
+      marketDayBucket(previous.updatedAt, quote.market) === marketDayBucket(quote.updatedAt, quote.market)
+      ? Math.max(0, quote.volume - previous.volume) : 0,
     source: "REAL_PROVIDER_SNAPSHOT",
+    dataProvider: quote.dataProvider ?? "EASTMONEY",
     isPartial: true,
     updatedAt: quote.receivedAt,
   };
+}
+
+function validQuoteSnapshot(quote: RealQuoteRecord): boolean {
+  return [quote.currentPrice, quote.previousClose, quote.openPrice, quote.highPrice, quote.lowPrice,
+    quote.rawCurrentPrice, quote.rawPreviousClose, quote.rawOpenPrice, quote.rawHighPrice, quote.rawLowPrice]
+    .every(p => Number.isFinite(p) && p > 0) &&
+    quote.highPrice >= Math.max(quote.openPrice, quote.currentPrice) &&
+    quote.lowPrice <= Math.min(quote.openPrice, quote.currentPrice) &&
+    [quote.changeAmount, quote.changePercent].every(Number.isFinite) &&
+    [quote.volume, quote.amount].every(v => Number.isFinite(v) && v >= 0) &&
+    (quote.updatedAt === "" || Number.isFinite(Date.parse(quote.updatedAt))) &&
+    Number.isFinite(Date.parse(quote.receivedAt));
 }
 
 function marketDayBucket(
@@ -1036,36 +1186,40 @@ async function upsertCandleRows(
       volume: candle.volume,
       average_price: candle.averagePrice ?? null,
       source: candle.source,
+      data_provider: candle.dataProvider ?? (candle.source === "REAL_TENCENT_HISTORY" ? "TENCENT" : candle.source === "REAL_PROVIDER_HISTORY" ? "EASTMONEY" : null),
       is_partial: candle.isPartial,
       updated_at: candle.updatedAt,
     }));
     await transaction.query(
       `INSERT INTO real_candles (
          instrument_id, interval, bucket_start, open, high, low, close,
-         volume, average_price, source, is_partial, updated_at
+         volume, average_price, source, data_provider, is_partial, updated_at
        )
        SELECT x.instrument_id, x.interval, x.bucket_start, x.open,
               x.high, x.low, x.close, x.volume, x.average_price,
-              x.source, x.is_partial, x.updated_at
+              x.source, x.data_provider, x.is_partial, x.updated_at
          FROM jsonb_to_recordset($1::jsonb) AS x(
            instrument_id text, interval text, bucket_start timestamptz,
            open float8, high float8, low float8, close float8,
            volume float8, average_price float8, source text,
-           is_partial boolean, updated_at timestamptz
+           data_provider text, is_partial boolean, updated_at timestamptz
          )
        ON CONFLICT (instrument_id, interval, bucket_start)
        DO UPDATE SET
-         open = ${mergeVolume ? "real_candles.open" : "excluded.open"},
-         high = ${mergeVolume ? "GREATEST(real_candles.high, excluded.high)" : "excluded.high"},
-         low = ${mergeVolume ? "LEAST(real_candles.low, excluded.low)" : "excluded.low"},
+         open = ${mergeVolume ? "CASE WHEN real_candles.source = excluded.source AND real_candles.data_provider IS NOT DISTINCT FROM excluded.data_provider THEN real_candles.open ELSE excluded.open END" : "excluded.open"},
+         high = ${mergeVolume ? "CASE WHEN real_candles.source = excluded.source AND real_candles.data_provider IS NOT DISTINCT FROM excluded.data_provider THEN GREATEST(real_candles.high, excluded.high) ELSE excluded.high END" : "excluded.high"},
+         low = ${mergeVolume ? "CASE WHEN real_candles.source = excluded.source AND real_candles.data_provider IS NOT DISTINCT FROM excluded.data_provider THEN LEAST(real_candles.low, excluded.low) ELSE excluded.low END" : "excluded.low"},
          close = excluded.close,
          volume = ${mergeVolume
-          ? "real_candles.volume + excluded.volume"
+          ? "CASE WHEN real_candles.source = excluded.source AND real_candles.data_provider IS NOT DISTINCT FROM excluded.data_provider THEN real_candles.volume + excluded.volume ELSE excluded.volume END"
           : "excluded.volume"},
          average_price = excluded.average_price,
          source = excluded.source,
+         data_provider = excluded.data_provider,
          is_partial = excluded.is_partial,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at
+       WHERE excluded.source IN ('REAL_PROVIDER_HISTORY', 'REAL_TENCENT_HISTORY')
+          OR real_candles.source NOT IN ('REAL_PROVIDER_HISTORY', 'REAL_TENCENT_HISTORY')`,
       [JSON.stringify(rows)],
     );
     await yieldToEventLoop();

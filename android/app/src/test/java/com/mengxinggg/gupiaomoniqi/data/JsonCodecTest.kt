@@ -20,6 +20,30 @@ import org.junit.Test
 
 class JsonCodecTest {
     @Test
+    fun `preserves unknown source time separately from receive time`() {
+        val json = JSONObject(TestJson.quote)
+            .put("updatedAt", "")
+            .put("receivedAt", "2026-10-28T14:00:00.000Z")
+            .put("dataProvider", "EASTMONEY")
+        val quote = JsonCodec.quote(json)
+        assertEquals("", quote.updatedAt)
+        assertEquals("2026-10-28T14:00:00.000Z", quote.receivedAt)
+    }
+
+    @Test
+    fun `preserves unavailable holdings and incomplete valuation flags`() {
+        val json = JSONObject(TestJson.portfolio)
+            .put("valuationComplete", false).put("unvaluedPositionCount", 1)
+        json.getJSONArray("positions").getJSONObject(0).put("valuationStatus", "UNAVAILABLE")
+        val portfolio = JsonCodec.portfolio(json)
+        assertFalse(portfolio.valuationComplete)
+        assertEquals(1, portfolio.unvaluedPositionCount)
+        assertEquals(12, portfolio.positions.single().quantity)
+        assertEquals("UNAVAILABLE", portfolio.positions.single().valuationStatus)
+        assertTrue(JsonCodec.portfolio(JSONObject(TestJson.portfolio)).valuationComplete)
+    }
+
+    @Test
     fun `parses open limit order with frozen funds and nullable fill fields`() {
         val order = JsonCodec.limitOrder(JSONObject(openLimitOrderJson()))
 

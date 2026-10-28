@@ -313,12 +313,12 @@ export function HomePage({
           </span>
           <h1>
             {mode === "REAL"
-              ? "真实全市场行情，零风险模拟交易。"
+              ? "多市场真实报价，零风险模拟交易。"
               : "真实标的，统一币种，模拟成交。"}
           </h1>
           <p>
             {mode === "REAL"
-              ? "东方财富返回的沪深、港股、美股与英股全部证券持续写入独立数据库；行情真实，资金与成交完全模拟。"
+              ? "优先记录东方财富返回的沪深、港股、美股与英股证券，缺失报价按已支持渠道补充；覆盖可能不完整，资金与成交完全模拟。"
               : "沪深、港股、美股与英股在同一行情页浏览。证券身份来自公开行情，价格路径与成交均为模拟。"}
           </p>
           <button
@@ -346,7 +346,7 @@ export function HomePage({
           </div>
           {mode === "REAL" ? (
             <div className="hero-ai real-provider-card">
-              <span>EASTMONEY · FULL UNIVERSE</span>
+              <span>东财优先 · 多源补充</span>
               <strong>
                 {realStatus
                   ? realStatus.instrumentCount.toLocaleString("zh-CN")
